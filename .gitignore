@@ -39,6 +39,10 @@ agy-ok.txt
 # Environment configurations and secrets
 .env
 .env.*
+.keys/
+*.key
+id_*
+*.pem
 
 # IDE & Editor files
 .idea/

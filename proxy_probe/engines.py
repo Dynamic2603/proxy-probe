@@ -21,17 +21,34 @@ _port_lock = threading.Lock()
 _next_port = [20000]
 
 
-def alloc_port() -> int:
+def _is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def alloc_port(max_attempts: int = 1000) -> int:
     with _port_lock:
-        _next_port[0] += 1
-        return _next_port[0]
+        for _ in range(max_attempts):
+            _next_port[0] += 1
+            if _next_port[0] > 60000:
+                _next_port[0] = 20000
+            if _is_port_free(_next_port[0]):
+                return _next_port[0]
+        raise RuntimeError("Не удалось найти свободный порт")
 
 
 def project_root() -> Path:
     candidate = Path(__file__).resolve().parent.parent
     if (candidate / "pyproject.toml").is_file():
         return candidate
-    return Path.cwd()
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        return Path(local) / "proxy-probe"
+    return Path.home() / ".proxy-probe"
 
 
 def app_bin_dir(custom_dir: Path | str | None = None) -> Path:
@@ -81,7 +98,7 @@ def _extract_binary(exe_dst: Path, zip_path: Path) -> None:
         hits = [n for n in z.namelist() if n.replace("\\", "/").lower().endswith(exe_name)]
         if not hits:
             raise SystemExit(f"В {zip_path.name} нет {exe_name}")
-        src = max(hits, key=len)
+        src = min(hits, key=lambda n: (n.replace("\\", "/").count("/"), len(n)))
         with z.open(src) as f, open(exe_dst, "wb") as o:
             shutil.copyfileobj(f, o)
 

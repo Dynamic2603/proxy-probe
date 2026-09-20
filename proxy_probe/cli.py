@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import dataclasses
 import os
 import shutil
 import sys
@@ -47,7 +48,7 @@ from .ui import (
 __all__ = ["main"]
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="pxp",
         description="proxy-probe (pxp): проверка серверов подписок на работу с целевыми утилитами (agy/Gemini)",
@@ -103,27 +104,36 @@ def main() -> None:
     ap.add_argument("--no-cache", action="store_true", help="не читать и не сохранять кэш результатов")
     ap.add_argument("--refresh-cache", action="store_true", help="принудительно перепроверить серверы из кэша")
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
-    args = ap.parse_args()
+    return ap
 
-    if args.throne_dir:
-        set_throne_dir(args.throne_dir)
 
-    for stream in (sys.stdout, sys.stderr):
-        recfg = getattr(stream, "reconfigure", None)
-        if recfg is not None:
-            with contextlib.suppress(ValueError):
-                recfg(encoding="utf-8", errors="replace")
-
-    agy_raw = args.agy_bin or os.environ.get("AGY_BIN") or get_default_agy_bin()
+def _resolve_agy_bin(args_agy_bin: str | None) -> str:
+    agy_raw = args_agy_bin or os.environ.get("AGY_BIN") or get_default_agy_bin()
     agy_candidate = Path(agy_raw)
     if agy_candidate.is_file():
-        agy_bin = str(agy_candidate.resolve())
-    else:
-        which_path = shutil.which(agy_raw)
-        if which_path and Path(which_path).is_file():
-            agy_bin = str(Path(which_path).resolve())
-        else:
-            raise SystemExit(f"agy.exe не найден: {agy_raw} (задайте --agy-bin или AGY_BIN)")
+        return str(agy_candidate.resolve())
+    which_path = shutil.which(agy_raw)
+    if which_path and Path(which_path).is_file():
+        return str(Path(which_path).resolve())
+    raise SystemExit(f"agy.exe не найден: {agy_raw} (задайте --agy-bin или AGY_BIN)")
+
+
+@dataclasses.dataclass
+class RuntimeContext:
+    agy_bin: str
+    cache: ResultCache | None
+    cache_path: Path
+    ttl_map: dict[str, int]
+    report_path: Path
+    import_path: Path
+    ver_sb: str
+    ver_xr: str
+    sb_exe: Path
+    xr_exe: Path
+
+
+def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
+    agy_bin = _resolve_agy_bin(args.agy_bin)
     print(f"Пробер agy: {agy_bin}")
 
     cache_path = Path(args.cache) if args.cache else default_cache_path()
@@ -145,10 +155,26 @@ def main() -> None:
     sb_exe, xr_exe = ensure_binaries(ver_sb, ver_xr, force=False)
     print(f"Движки: {sb_exe}, {xr_exe}")
 
-    groups = read_groups()
-    if not groups:
-        raise SystemExit("В БД Throne нет активных групп")
+    return RuntimeContext(
+        agy_bin=agy_bin,
+        cache=cache,
+        cache_path=cache_path,
+        ttl_map=ttl_map,
+        report_path=report_path,
+        import_path=import_path,
+        ver_sb=ver_sb,
+        ver_xr=ver_xr,
+        sb_exe=sb_exe,
+        xr_exe=xr_exe,
+    )
 
+
+def _collect_and_select_servers(
+    args: argparse.Namespace,
+    groups: list[dict[str, Any]],
+    cache: ResultCache | None,
+    ttl_map: dict[str, int],
+) -> tuple[list[Server], list[Server], dict[str, int], list[str]] | None:
     prefetched_subs: dict[str, bytes] = {}
     selected = set(int(x) for x in args.group)
     if not selected:
@@ -174,12 +200,8 @@ def main() -> None:
         selected = interactive_select(groups, counts)
 
     if not selected:
-        print("Ничего не выбрано — выход.")
-        pause_on_exit(args.no_pause)
-        return
+        return None
 
-    timeouts = {"start": args.timeout, "probe": args.timeout, "geo": min(args.timeout, 10.0)}
-    t0 = time.time()
     servers, warnings = gather_sources(groups, selected, args.no_fetch, prefetched=prefetched_subs)
     servers = dedupe_servers(servers)
     if args.subset > 0:
@@ -213,10 +235,24 @@ def main() -> None:
         f"\nВсего серверов: {len(servers)} (к проверке: {len(to_probe)}, из кэша: {cache_summary}, "
         f"jobs={args.jobs}, таймаут={args.timeout:.0f}с)"
     )
+    return servers, to_probe, cached_counts, warnings
+
+
+def _execute_probe_pool(
+    to_probe: list[Server],
+    jobs: int,
+    timeouts: dict[str, float],
+    xr_exe: Path,
+    sb_exe: Path,
+    agy_bin: str,
+    print_timeout: str,
+) -> None:
+    if not to_probe:
+        return
 
     run_root = run_dir()
     futures: dict[concurrent.futures.Future[Any], Server] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         for s in to_probe:
             bin_path = str(xr_exe if s.engine == "xray" else sb_exe)
             port = alloc_port()
@@ -229,7 +265,7 @@ def main() -> None:
                 run_root,
                 timeouts,
                 agy_bin=agy_bin,
-                print_timeout=args.print_timeout,
+                print_timeout=print_timeout,
             )
             futures[fut] = s
 
@@ -249,8 +285,21 @@ def main() -> None:
             ex.shutdown(wait=False, cancel_futures=True)
             raise
 
-    dt = time.time() - t0
 
+def _finalize_and_report(
+    servers: list[Server],
+    to_probe: list[Server],
+    cache: ResultCache | None,
+    cache_path: Path,
+    ttl_map: dict[str, int],
+    report_path: Path,
+    import_path: Path,
+    ver_sb: str,
+    ver_xr: str,
+    warnings: list[str],
+    dt: float,
+    cached_counts: dict[str, int],
+) -> None:
     if cache:
         for s in servers:
             cache.enrich_from_server(s)
@@ -283,6 +332,60 @@ def main() -> None:
     print_results_table(servers)
     print_summary_panel(servers, cached_counts, report_path, import_path, nb, nx, dt)
 
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+
+    if args.throne_dir:
+        set_throne_dir(args.throne_dir)
+
+    for stream in (sys.stdout, sys.stderr):
+        recfg = getattr(stream, "reconfigure", None)
+        if recfg is not None:
+            with contextlib.suppress(ValueError):
+                recfg(encoding="utf-8", errors="replace")
+
+    ctx = _setup_environment(args)
+
+    groups = read_groups()
+    if not groups:
+        raise SystemExit("В БД Throne нет активных групп")
+
+    selection = _collect_and_select_servers(args, groups, ctx.cache, ctx.ttl_map)
+    if selection is None:
+        print("Ничего не выбрано — выход.")
+        pause_on_exit(args.no_pause)
+        return
+
+    servers, to_probe, cached_counts, warnings = selection
+    timeouts = {"start": args.timeout, "probe": args.timeout, "geo": min(args.timeout, 10.0)}
+    t0 = time.time()
+
+    _execute_probe_pool(
+        to_probe=to_probe,
+        jobs=args.jobs,
+        timeouts=timeouts,
+        xr_exe=ctx.xr_exe,
+        sb_exe=ctx.sb_exe,
+        agy_bin=ctx.agy_bin,
+        print_timeout=args.print_timeout,
+    )
+    dt = time.time() - t0
+
+    _finalize_and_report(
+        servers=servers,
+        to_probe=to_probe,
+        cache=ctx.cache,
+        cache_path=ctx.cache_path,
+        ttl_map=ctx.ttl_map,
+        report_path=ctx.report_path,
+        import_path=ctx.import_path,
+        ver_sb=ctx.ver_sb,
+        ver_xr=ctx.ver_xr,
+        warnings=warnings,
+        dt=dt,
+        cached_counts=cached_counts,
+    )
     pause_on_exit(args.no_pause)
 
 

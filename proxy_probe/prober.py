@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -62,12 +63,16 @@ def classify_agy(out: str, rc: int) -> str:
     out_lower = out.lower()
     if any(m.lower() in out_lower for m in BLOCK_MARKERS):
         return RESULT_BLOCK
-    for p in DEAD_PATTERNS:
-        if p.lower() in out_lower:
-            return RESULT_DEAD
     for p in UNKNOWN_PATTERNS:
         if p.lower() in out_lower:
             return RESULT_UNKNOWN
+    for p in DEAD_PATTERNS:
+        p_lower = p.lower()
+        if p_lower == "eof":
+            if re.search(r"\beof\b", out_lower):
+                return RESULT_DEAD
+        elif p_lower in out_lower:
+            return RESULT_DEAD
     if rc < 0:
         return RESULT_DEAD
     if rc != 0 or not out.strip():
@@ -163,11 +168,17 @@ def run_probe(
     proc = None
     try:
         out_f = open(out_path, "wb")
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+        }
         proc = subprocess.Popen(
             [engine_bin, "run", "-c", "config.json"],
             cwd=str(d),
             stdout=out_f,
             stderr=subprocess.STDOUT,
+            env=clean_env,
         )
     except OSError as e:
         if out_f is not None:
@@ -235,3 +246,5 @@ def run_probe(
             except Exception:
                 with contextlib.suppress(Exception):
                     proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)

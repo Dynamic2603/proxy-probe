@@ -11,7 +11,9 @@ DEFAULT_CACHE_NAME = "results.json"
 
 
 def default_cache_path() -> Path:
-    return Path(__file__).resolve().parent.parent / DEFAULT_CACHE_NAME
+    from .engines import project_root
+
+    return project_root() / DEFAULT_CACHE_NAME
 
 
 def utcnow() -> _dt.datetime:
@@ -72,7 +74,7 @@ class ResultCache:
             if cur:
                 cur_prio = RESULT_PRIORITIES.get(str(cur.get("result", "")), 0)
                 new_prio = RESULT_PRIORITIES.get(str(record.get("result", "")), 0)
-                if cur_prio > new_prio:
+                if cur_prio >= new_prio:
                     return
         self.entries[server_key] = record
 

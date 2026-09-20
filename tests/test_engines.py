@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from proxy_probe.engines import (
     alloc_port,
     build_singbox_config,
@@ -40,10 +42,26 @@ def test_xray_shorthand_to_v2ray() -> None:
     assert v2["settings"]["vnext"][0]["users"][0]["id"] == "uuid-xyz"
 
 
-def test_app_bin_dir() -> None:
-    from proxy_probe.engines import app_bin_dir, project_root
+def test_app_bin_dir(tmp_path: Path) -> None:
+    from proxy_probe.engines import app_bin_dir
 
-    b = app_bin_dir()
+    custom = tmp_path / "custom_bin"
+    b = app_bin_dir(custom_dir=custom)
     assert b.is_dir()
-    assert b == project_root() / "bin"
+    assert b == custom
+
+
+def test_extract_binary_least_nested(tmp_path: Path) -> None:
+    import zipfile
+
+    from proxy_probe.engines import _extract_binary
+
+    zip_file = tmp_path / "test.zip"
+    with zipfile.ZipFile(zip_file, "w") as z:
+        z.writestr("deep/nested/folder/sing-box.exe", b"nested")
+        z.writestr("sing-box-v1/sing-box.exe", b"root_exe")
+
+    dst = tmp_path / "sing-box.exe"
+    _extract_binary(dst, zip_file)
+    assert dst.read_bytes() == b"root_exe"
 

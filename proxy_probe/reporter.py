@@ -7,7 +7,9 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import RESULT_OK, Server
+from .models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, RESULT_UNKNOWN, Server
+
+RESULT_TABLE_ORDER = {RESULT_OK: 0, RESULT_BLOCK: 1, RESULT_UNKNOWN: 2, RESULT_DEAD: 3}
 
 if TYPE_CHECKING:
     from .cache import ResultCache
@@ -26,7 +28,7 @@ def write_report(
     counts = Counter(s.result for s in servers)
     lines: list[str] = [
         "# Отчёт о проверке серверов подписок (работа с agy / Gemini)\n",
-        f"- Дата: {_dt.datetime.now().isoformat(timespec='seconds')}",
+        f"- Дата: {_dt.datetime.now(_dt.UTC).astimezone().isoformat(timespec='seconds')}",
         f"- Проверено серверов: {len(servers)}",
     ]
     if cached_counts:
@@ -53,7 +55,11 @@ def write_report(
     lines.append("\n## Результаты\n")
     lines.append("| № | Результат | Группа | Движок | Сервер | Страна | Egress IP | мс | Имя | Ответ / Примечание |")
     lines.append("|---|-----------|--------|--------|--------|--------|-----------|-----|-----|-------------------|")
-    for s in servers:
+    sorted_servers = sorted(
+        servers,
+        key=lambda s: (RESULT_TABLE_ORDER.get(s.result, 99), s.index),
+    )
+    for s in sorted_servers:
         name = (s.name or "").replace("|", "\\|")[:60]
         note = (s.note or "").replace("|", "\\|").replace("\n", " ").strip()
         lines.append(

@@ -90,3 +90,29 @@ def test_link_to_outbound_vmess() -> None:
     assert obj["transport"]["path"] == "/ws"
     assert obj["transport"]["headers"]["Host"] == "cdn.example.com"
 
+
+def test_parse_shadowsocks_formats() -> None:
+    # 1. Base64 с паддингом
+    link_b64 = "ss://YWVzLTEyOC1nY206cGFzczEyMw==@1.2.3.4:8388#SS-Padded"
+    eng, obj = link_to_outbound(link_b64)
+    assert eng == "sing-box"
+    assert obj["type"] == "shadowsocks"
+    assert obj["method"] == "aes-128-gcm"
+    assert obj["password"] == "pass123"
+    assert obj["server"] == "1.2.3.4"
+    assert obj["server_port"] == 8388
+
+    # 2. Base64 без паддинга
+    link_unpadded = "ss://YWVzLTEyOC1nY206cGFzczEyMw@1.2.3.4:8388#SS-Unpadded"
+    eng, obj = link_to_outbound(link_unpadded)
+    assert eng == "sing-box"
+    assert obj["method"] == "aes-128-gcm"
+    assert obj["password"] == "pass123"
+
+    # 3. Plain text format: method:password@host:port
+    link_plain = "ss://aes-128-gcm:pass123@1.2.3.4:8388#SS-Plain"
+    eng, obj = link_to_outbound(link_plain)
+    assert eng == "sing-box"
+    assert obj["method"] == "aes-128-gcm"
+    assert obj["password"] == "pass123"
+

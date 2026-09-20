@@ -46,3 +46,26 @@ def test_cache_priority_resolution(tmp_path: Path) -> None:
     rec_ok = {"checked": now.isoformat(), "result": RESULT_OK}
     cache.put("host:443", rec_ok, force=False, now=now)
     assert cache.entries["host:443"]["result"] == RESULT_BLOCK
+
+
+def test_cache_equal_priority_not_overwritten(tmp_path: Path) -> None:
+    cache_file = tmp_path / "test_equal_prio.json"
+    cache = ResultCache(path=cache_file, ttl_map={RESULT_OK: 3600})
+    now = _dt.datetime(2026, 1, 1, 12, 0, 0)
+
+    # Первая запись с import_obj
+    rec1 = {
+        "checked": now.isoformat(),
+        "result": RESULT_OK,
+        "import_obj": {"tag": "first"},
+    }
+    cache.put("1.1.1.1:443", rec1, now=now)
+
+    # Вторая запись с тем же приоритетом (RESULT_OK) не должна перезаписывать первую
+    rec2 = {
+        "checked": now.isoformat(),
+        "result": RESULT_OK,
+        "import_obj": None,
+    }
+    cache.put("1.1.1.1:443", rec2, force=False, now=now)
+    assert cache.entries["1.1.1.1:443"]["import_obj"] == {"tag": "first"}

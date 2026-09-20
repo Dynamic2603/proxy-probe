@@ -92,6 +92,7 @@ def parse_vless(link: str) -> tuple[str, dict]:
     if net in ("raw", "none"):
         net = "tcp"
     sec = q.get("security", "none")
+    # flow (XTLS Vision) применим только к TCP-потокам sing-box; в xhttp ветке намеренно опускается
     flow = q.get("flow", "")
 
     if net == "xhttp":
@@ -171,11 +172,17 @@ def parse_shadowsocks(link: str) -> tuple[str, dict]:
     _, cred, host, port, _, name = _parse_uri(link)
     if not host or not port or not cred:
         return "sing-box", {}
+    dec = None
+    pad = "=" * ((-len(cred)) % 4)
     try:
-        dec = base64.b64decode(cred, validate=False).decode("utf-8", "replace")
-        method, password = dec.split(":", 1) if ":" in dec else ("aes-128-gcm", cred)
+        raw = base64.b64decode(cred + pad, validate=True).decode("utf-8", "replace")
+        if ":" in raw:
+            dec = raw
     except Exception:
-        return "sing-box", {}
+        pass
+    if dec is None:
+        dec = cred
+    method, password = dec.split(":", 1) if ":" in dec else ("aes-128-gcm", dec)
     return "sing-box", {
         "type": "shadowsocks",
         "tag": name or f"{host}:{port}",
@@ -278,9 +285,12 @@ def split_blocks(text: str) -> list[str]:
     return items
 
 
+_MIN_BASE64_BODY_LEN = 80  # Минимальная длина строки для эвристики base64-подписки
+
+
 def decode_body(data: bytes) -> str:
     txt = data.decode("utf-8", "replace")
-    if len(txt) > 80 and bool(re.fullmatch(r"[A-Za-z0-9+/=\r\n]*", txt)) and "://" not in txt:
+    if len(txt) > _MIN_BASE64_BODY_LEN and bool(re.fullmatch(r"[A-Za-z0-9+/=\r\n]*", txt)) and "://" not in txt:
         try:
             dec = base64.b64decode(re.sub(r"\s+", "", txt), validate=True).decode("utf-8", "replace")
             if re.search(r"[a-z0-9]+://", dec, re.IGNORECASE):

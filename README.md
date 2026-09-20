@@ -77,3 +77,9 @@ Instead of manual one-time imports, `proxy-ok.txt` can be linked as an auto-upda
 - [ ] **Autonomous local database**: Managing and rotating proxy pools independently of any specific client UI.
 - [ ] **Extended client adapters**: Direct import/export for v2rayN, Clash Verge Rev / Mihomo, Nekoray, and raw sing-box configs.
 - [ ] **Graphical User Interface (GUI)**: Desktop/web UI for visual pool management, target selection, and one-click testing.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

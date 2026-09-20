@@ -25,6 +25,10 @@ def set_throne_dir(path: Path | str | None) -> None:
     _snapshot_source_dir = None
 
 
+def reset_throne_state() -> None:
+    set_throne_dir(None)
+
+
 def find_throne_dir(custom_path: Path | str | None = None) -> Path:
     if custom_path:
         p = Path(custom_path).resolve()

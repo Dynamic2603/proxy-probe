@@ -4,7 +4,7 @@
 
 ---
 
-## Источники информации и движки
+## Внешние источники информации и движки
 
 1. **Репозиторий Throne**: `https://github.com/throneproj/Throne` (C++/Qt, движки sing-box и Xray).
    - Каталог данных: `%LOCALAPPDATA%\Throne` или `%APPDATA%\Throne`.

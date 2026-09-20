@@ -60,7 +60,8 @@ def test_write_report(tmp_path: Path) -> None:
     content = rep_file.read_text(encoding="utf-8")
     assert "# Отчёт о проверке серверов подписок" in content
     assert "sing-box v1.13.16, Xray v26.7.28" in content
-    assert "15 с" in content
+    assert "- Время проверки:" in content
+    assert "15" in content
     assert "Внимание: тестовое предупреждение" in content
     assert "Server\\|1" in content
     assert "Line 1 Line 2 \\| Pipe" in content

@@ -65,3 +65,54 @@ def test_extract_binary_least_nested(tmp_path: Path) -> None:
     _extract_binary(dst, zip_file)
     assert dst.read_bytes() == b"root_exe"
 
+
+def test_verify_file_hash(tmp_path: Path) -> None:
+    from proxy_probe.engines import compute_file_sha256, verify_file_hash
+
+    test_file = tmp_path / "hello.txt"
+    test_file.write_bytes(b"hello world")
+    expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    assert compute_file_sha256(test_file) == expected
+    assert verify_file_hash(test_file, expected)
+    assert verify_file_hash(test_file, expected.upper())
+    assert not verify_file_hash(test_file, "wrong_hash")
+
+
+def test_extract_sha256_from_text() -> None:
+    from proxy_probe.engines import extract_sha256_from_text
+
+    h = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    # DGST format
+    assert extract_sha256_from_text(f"MD5= 123\nSHA2-256= {h}\nSHA1= abc") == h
+    # checksums.txt format with asset name
+    assert extract_sha256_from_text(f"{h}  *my-file.zip", "my-file.zip") == h
+    # Plain hash
+    assert extract_sha256_from_text(h) == h
+    # No hash
+    assert extract_sha256_from_text("no valid hash here") is None
+
+
+def test_verify_file_against_upstream(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    from proxy_probe.engines import verify_file_against_upstream
+
+    test_file = tmp_path / "app.zip"
+    test_file.write_bytes(b"hello world")
+    good_hash = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+
+    # 1. Upstream has no checksum -> passes gracefully
+    monkeypatch.setattr("proxy_probe.engines.fetch_upstream_sha256", lambda *args: None)
+    assert verify_file_against_upstream(test_file, "repo", "tag", "app.zip") is True
+
+    # 2. Upstream hash matches -> passes
+    monkeypatch.setattr("proxy_probe.engines.fetch_upstream_sha256", lambda *args: good_hash)
+    assert verify_file_against_upstream(test_file, "repo", "tag", "app.zip") is True
+
+    # 3. Upstream hash differs -> raises SystemExit
+    monkeypatch.setattr("proxy_probe.engines.fetch_upstream_sha256", lambda *args: "0" * 64)
+    with pytest.raises(SystemExit):
+        verify_file_against_upstream(test_file, "repo", "tag", "app.zip")
+
+
+

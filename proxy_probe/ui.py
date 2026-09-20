@@ -5,8 +5,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from InquirerPy import inquirer
-from InquirerPy.base.control import Choice
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -41,6 +39,9 @@ def format_latency(ms: int) -> str:
 def select_groups_interactive(groups: list[dict[str, Any]], counts: dict[int, int]) -> set[int]:
     if not sys.stdin or not sys.stdin.isatty():
         return {g["id"] for g in groups}
+
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
 
     choices: list[Choice] = []
     for g in groups:

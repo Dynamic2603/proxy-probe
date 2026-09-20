@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -44,14 +45,9 @@ def find_agy_bin() -> str:
     return "agy"
 
 
-_agy_bin_cached: str | None = None
-
-
+@cache
 def get_default_agy_bin() -> str:
-    global _agy_bin_cached
-    if _agy_bin_cached is None:
-        _agy_bin_cached = find_agy_bin()
-    return _agy_bin_cached
+    return find_agy_bin()
 
 
 AGY_PROMPT = "Reply with only the word OK"

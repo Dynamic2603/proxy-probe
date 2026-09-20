@@ -242,9 +242,7 @@ def _execute_probe_pool(
     to_probe: list[Server],
     jobs: int,
     timeouts: dict[str, float],
-    xr_exe: Path,
-    sb_exe: Path,
-    agy_bin: str,
+    ctx: RuntimeContext,
     print_timeout: str,
 ) -> None:
     if not to_probe:
@@ -254,7 +252,7 @@ def _execute_probe_pool(
     futures: dict[concurrent.futures.Future[Any], Server] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         for s in to_probe:
-            bin_path = str(xr_exe if s.engine == "xray" else sb_exe)
+            bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
             port = alloc_port()
             fut = ex.submit(
                 run_probe,
@@ -264,7 +262,7 @@ def _execute_probe_pool(
                 port,
                 run_root,
                 timeouts,
-                agy_bin=agy_bin,
+                agy_bin=ctx.agy_bin,
                 print_timeout=print_timeout,
             )
             futures[fut] = s
@@ -287,50 +285,44 @@ def _execute_probe_pool(
 
 
 def _finalize_and_report(
+    ctx: RuntimeContext,
     servers: list[Server],
     to_probe: list[Server],
-    cache: ResultCache | None,
-    cache_path: Path,
-    ttl_map: dict[str, int],
-    report_path: Path,
-    import_path: Path,
-    ver_sb: str,
-    ver_xr: str,
     warnings: list[str],
     dt: float,
     cached_counts: dict[str, int],
 ) -> None:
-    if cache:
+    if ctx.cache:
         for s in servers:
-            cache.enrich_from_server(s)
+            ctx.cache.enrich_from_server(s)
         for s in to_probe:
-            cache.update_from_server(s)
-        cache.save()
-        console.print(f"[dim]Кэш обновлён: {cache_path} (записей: {len(cache.entries)})[/dim]")
+            ctx.cache.update_from_server(s)
+        ctx.cache.save()
+        console.print(f"[dim]Кэш обновлён: {ctx.cache_path} (записей: {len(ctx.cache.entries)})[/dim]")
 
     cache_note = ""
-    if cache:
-        ttl_txt = ", ".join(f"{k}: {v // 3600} ч" if v > 0 else f"{k}: не устаревает" for k, v in ttl_map.items())
+    if ctx.cache:
+        ttl_txt = ", ".join(f"{k}: {v // 3600} ч" if v > 0 else f"{k}: не устаревает" for k, v in ctx.ttl_map.items())
         cache_note = (
-            f"Серверы с кешируемыми результатами (AGY-OK/AGY-BLOCK/DEAD) берутся из кэша ({cache_path}) "
+            f"Серверы с кешируемыми результатами (AGY-OK/AGY-BLOCK/DEAD) берутся из кэша ({ctx.cache_path}) "
             f"и не перепроверяются до истечения TTL по типу: {ttl_txt}; "
             f"принудительная перепроверка — запуск с --refresh-cache."
         )
 
     write_report(
         servers,
-        report_path,
-        ver_sb,
-        ver_xr,
+        ctx.report_path,
+        ctx.ver_sb,
+        ctx.ver_xr,
         warnings,
         dt,
         cached_counts=cached_counts,
         cache_note=cache_note,
     )
-    nb, nx = write_import_file(cache, import_path, fallback_servers=servers)
+    nb, nx = write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
 
     print_results_table(servers)
-    print_summary_panel(servers, cached_counts, report_path, import_path, nb, nx, dt)
+    print_summary_panel(servers, cached_counts, ctx.report_path, ctx.import_path, nb, nx, dt)
 
 
 def main() -> None:
@@ -365,23 +357,15 @@ def main() -> None:
         to_probe=to_probe,
         jobs=args.jobs,
         timeouts=timeouts,
-        xr_exe=ctx.xr_exe,
-        sb_exe=ctx.sb_exe,
-        agy_bin=ctx.agy_bin,
+        ctx=ctx,
         print_timeout=args.print_timeout,
     )
     dt = time.time() - t0
 
     _finalize_and_report(
+        ctx=ctx,
         servers=servers,
         to_probe=to_probe,
-        cache=ctx.cache,
-        cache_path=ctx.cache_path,
-        ttl_map=ctx.ttl_map,
-        report_path=ctx.report_path,
-        import_path=ctx.import_path,
-        ver_sb=ctx.ver_sb,
-        ver_xr=ctx.ver_xr,
         warnings=warnings,
         dt=dt,
         cached_counts=cached_counts,

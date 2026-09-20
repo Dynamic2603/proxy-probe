@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -16,6 +18,68 @@ from .parsers import USER_AGENT
 
 SINGBOX_REPO = "SagerNet/sing-box"
 XRAY_REPO = "XTLS/Xray-core"
+
+
+def compute_file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 16):
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def verify_file_hash(path: Path, expected_sha256: str) -> bool:
+    actual = compute_file_sha256(path)
+    return actual == expected_sha256.strip().lower()
+
+
+def extract_sha256_from_text(text: str, asset_name: str = "") -> str | None:
+    if m := re.search(r"SHA2?-?256\s*[:=]\s*([a-fA-F0-9]{64})", text, re.IGNORECASE):
+        return m.group(1).lower()
+    if asset_name:
+        escaped = re.escape(asset_name)
+        if m := re.search(rf"\b([a-fA-F0-9]{{64}})\s+\*?{escaped}\b", text, re.IGNORECASE):
+            return m.group(1).lower()
+    if m := re.search(r"\b([a-fA-F0-9]{64})\b", text):
+        return m.group(1).lower()
+    return None
+
+
+def fetch_upstream_sha256(repo: str, tag: str, asset_name: str, timeout: float = 15.0) -> str | None:
+    candidates = [
+        f"{asset_name}.dgst",
+        f"{asset_name}.sha256",
+        f"{asset_name}.sha256sum",
+        "sha256sums.txt",
+        "checksums.txt",
+    ]
+    for cand in candidates:
+        url = f"https://github.com/{repo}/releases/download/{tag}/{cand}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    raw = resp.read().decode("utf-8", "replace")
+                    sha = extract_sha256_from_text(raw, asset_name)
+                    if sha:
+                        return sha
+        except Exception:
+            continue
+    return None
+
+
+def verify_file_against_upstream(file_path: Path, repo: str, tag: str, asset_name: str) -> bool:
+    expected_sha = fetch_upstream_sha256(repo, tag, asset_name)
+    if not expected_sha:
+        print(f"  [dim]{asset_name}: upstream ({repo} {tag}) не публикует контрольную сумму, проверка пропущена[/dim]")
+        return True
+    actual_sha = compute_file_sha256(file_path)
+    if actual_sha != expected_sha:
+        raise SystemExit(
+            f"Ошибка SHA-256 для {asset_name}: хэш файла ({actual_sha}) не совпадает с upstream ({expected_sha})"
+        )
+    print(f"  [green]✓ SHA-256 верифицирован по upstream ({expected_sha[:12]}...)[/green]")
+    return True
 
 _port_lock = threading.Lock()
 _next_port = [20000]
@@ -119,16 +183,20 @@ def ensure_binaries(
             pass
 
     print(f"Скачиваю движки: sing-box v{ver_sb}, Xray v{ver_xr} ...")
-    sb_zip = target_bin_dir / f"sing-box-{ver_sb}-windows-amd64.zip"
-    url_sb = _resolve_asset_url(SINGBOX_REPO, f"v{ver_sb}", f"sing-box-{ver_sb}-windows-amd64.zip")
+    sb_zip_name = f"sing-box-{ver_sb}-windows-amd64.zip"
+    sb_zip = target_bin_dir / sb_zip_name
+    url_sb = _resolve_asset_url(SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
     if not sb_zip.exists():
         download_file(url_sb, sb_zip)
+    verify_file_against_upstream(sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
     _extract_binary(sb_exe, sb_zip)
 
-    xr_zip = target_bin_dir / "Xray-windows-64.zip"
-    url_xr = _resolve_asset_url(XRAY_REPO, f"v{ver_xr}", "Xray-windows-64.zip")
+    xr_zip_name = "Xray-windows-64.zip"
+    xr_zip = target_bin_dir / xr_zip_name
+    url_xr = _resolve_asset_url(XRAY_REPO, f"v{ver_xr}", xr_zip_name)
     if not xr_zip.exists():
         download_file(url_xr, xr_zip)
+    verify_file_against_upstream(xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
     _extract_binary(xr_exe, xr_zip)
 
     manifest.write_text(json.dumps(want), encoding="utf-8")

@@ -53,5 +53,9 @@ def test_classify_agy_return_codes() -> None:
 
 
 def test_get_default_agy_bin() -> None:
-    b = prober.get_default_agy_bin()
-    assert isinstance(b, str) and len(b) > 0
+    prober.get_default_agy_bin.cache_clear()
+    b1 = prober.get_default_agy_bin()
+    assert isinstance(b1, str) and len(b1) > 0
+    b2 = prober.get_default_agy_bin()
+    assert b1 == b2
+    prober.get_default_agy_bin.cache_clear()

@@ -1,0 +1,52 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Testing and linting caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary and backup files
+*.bak
+*.tmp
+*.part
+*.log
+
+# Binary engines cache
+bin/
+.bin/
+
+# Runtime reports and probe output
+report.md
+proxy-ok.txt
+results.json
+*-report.md
+*-verify.md
+*-ok.txt
+agy-report.md
+agy-ok.txt
+
+# Environment configurations and secrets
+.env
+.env.*
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+desktop.ini
+*.lnk

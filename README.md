@@ -9,6 +9,11 @@ Refreshes subscriptions via URL or client database (e.g. Throne), launches isola
 
 ---
 
+## Requirements
+
+- **Python**: 3.11+ (fully tested on Python 3.11–3.14).
+- **Package manager**: [uv](https://docs.astral.sh/uv/) (recommended).
+
 
 ## Usage
 

@@ -34,18 +34,21 @@ def verify_file_hash(path: Path, expected_sha256: str) -> bool:
 
 
 def extract_sha256_from_text(text: str, asset_name: str = "") -> str | None:
-    if m := re.search(r"SHA2?-?256\s*[:=]\s*([a-fA-F0-9]{64})", text, re.IGNORECASE):
-        return m.group(1).lower()
     if asset_name:
         escaped = re.escape(asset_name)
-        if m := re.search(rf"\b([a-fA-F0-9]{{64}})\s+\*?{escaped}\b", text, re.IGNORECASE):
+        if m := re.search(rf"\b([a-fA-F0-9]{{64}})\s+\*?{escaped}(?:\s|$)", text, re.IGNORECASE):
             return m.group(1).lower()
-    if m := re.search(r"\b([a-fA-F0-9]{64})\b", text):
+        if m := re.search(rf"(?:^|\s){escaped}\s+\*?([a-fA-F0-9]{{64}})\b", text, re.IGNORECASE):
+            return m.group(1).lower()
+    if m := re.search(r"SHA2?-?256\s*[:=]\s*([a-fA-F0-9]{64})", text, re.IGNORECASE):
         return m.group(1).lower()
+    all_hashes = re.findall(r"\b[a-fA-F0-9]{64}\b", text)
+    if len(all_hashes) == 1:
+        return all_hashes[0].lower()
     return None
 
 
-def fetch_upstream_sha256(repo: str, tag: str, asset_name: str, timeout: float = 15.0) -> str | None:
+def fetch_upstream_sha256(repo: str, tag: str, asset_name: str, timeout: float = 10.0) -> str | None:
     candidates = [
         f"{asset_name}.dgst",
         f"{asset_name}.sha256",
@@ -63,22 +66,26 @@ def fetch_upstream_sha256(repo: str, tag: str, asset_name: str, timeout: float =
                     sha = extract_sha256_from_text(raw, asset_name)
                     if sha:
                         return sha
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue
+            return None
         except Exception:
-            continue
+            return None
     return None
 
 
 def verify_file_against_upstream(file_path: Path, repo: str, tag: str, asset_name: str) -> bool:
     expected_sha = fetch_upstream_sha256(repo, tag, asset_name)
     if not expected_sha:
-        print(f"  [dim]{asset_name}: upstream ({repo} {tag}) не публикует контрольную сумму, проверка пропущена[/dim]")
+        print(f"  {asset_name}: upstream ({repo} {tag}) не публикует контрольную сумму, проверка пропущена")
         return True
     actual_sha = compute_file_sha256(file_path)
     if actual_sha != expected_sha:
         raise SystemExit(
             f"Ошибка SHA-256 для {asset_name}: хэш файла ({actual_sha}) не совпадает с upstream ({expected_sha})"
         )
-    print(f"  [green]✓ SHA-256 верифицирован по upstream ({expected_sha[:12]}...)[/green]")
+    print(f"  ✓ SHA-256 верифицирован по upstream ({expected_sha[:12]}...)")
     return True
 
 _port_lock = threading.Lock()
@@ -167,6 +174,19 @@ def _extract_binary(exe_dst: Path, zip_path: Path) -> None:
             shutil.copyfileobj(f, o)
 
 
+def _download_and_verify_archive(
+    url: str, dest: Path, repo: str, tag: str, asset_name: str, timeout: float = 120.0
+) -> None:
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    download_file(url, tmp, timeout=timeout)
+    try:
+        verify_file_against_upstream(tmp, repo, tag, asset_name)
+    except (SystemExit, Exception):
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+
+
 def ensure_binaries(
     ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path | None = None
 ) -> tuple[Path, Path]:
@@ -187,16 +207,26 @@ def ensure_binaries(
     sb_zip = target_bin_dir / sb_zip_name
     url_sb = _resolve_asset_url(SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
     if not sb_zip.exists():
-        download_file(url_sb, sb_zip)
-    verify_file_against_upstream(sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
+        _download_and_verify_archive(url_sb, sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
+    else:
+        try:
+            verify_file_against_upstream(sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
+        except (SystemExit, Exception):
+            sb_zip.unlink(missing_ok=True)
+            raise
     _extract_binary(sb_exe, sb_zip)
 
     xr_zip_name = "Xray-windows-64.zip"
     xr_zip = target_bin_dir / xr_zip_name
     url_xr = _resolve_asset_url(XRAY_REPO, f"v{ver_xr}", xr_zip_name)
     if not xr_zip.exists():
-        download_file(url_xr, xr_zip)
-    verify_file_against_upstream(xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
+        _download_and_verify_archive(url_xr, xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
+    else:
+        try:
+            verify_file_against_upstream(xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
+        except (SystemExit, Exception):
+            xr_zip.unlink(missing_ok=True)
+            raise
     _extract_binary(xr_exe, xr_zip)
 
     manifest.write_text(json.dumps(want), encoding="utf-8")

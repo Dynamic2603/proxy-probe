@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from proxy_probe.engines import (
     alloc_port,
     build_singbox_config,
@@ -92,9 +94,7 @@ def test_extract_sha256_from_text() -> None:
     assert extract_sha256_from_text("no valid hash here") is None
 
 
-def test_verify_file_against_upstream(tmp_path: Path, monkeypatch) -> None:
-    import pytest
-
+def test_verify_file_against_upstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from proxy_probe.engines import verify_file_against_upstream
 
     test_file = tmp_path / "app.zip"
@@ -113,6 +113,41 @@ def test_verify_file_against_upstream(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("proxy_probe.engines.fetch_upstream_sha256", lambda *args: "0" * 64)
     with pytest.raises(SystemExit):
         verify_file_against_upstream(test_file, "repo", "tag", "app.zip")
+
+
+def test_extract_sha256_from_text_multiple_hashes() -> None:
+    from proxy_probe.engines import extract_sha256_from_text
+
+    h1 = "a" * 64
+    h2 = "b" * 64
+    text = f"{h1}  sing-box-linux-amd64.tar.gz\n{h2}  sing-box-windows-amd64.zip\n"
+
+    # Should return h2 for windows-amd64.zip and not h1
+    assert extract_sha256_from_text(text, "sing-box-windows-amd64.zip") == h2
+    # Without asset name, since there are multiple hashes, it must return None
+    assert extract_sha256_from_text(text) is None
+
+
+def test_download_and_verify_archive_cleanup_on_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from proxy_probe.engines import _download_and_verify_archive
+
+    dest = tmp_path / "app.zip"
+    monkeypatch.setattr(
+        "proxy_probe.engines.download_file",
+        lambda url, tmp, timeout=120.0: tmp.write_bytes(b"corrupted content"),
+    )
+
+    def mock_verify(path, repo, tag, name):
+        raise SystemExit("Checksum mismatch")
+
+    monkeypatch.setattr("proxy_probe.engines.verify_file_against_upstream", mock_verify)
+
+    with pytest.raises(SystemExit):
+        _download_and_verify_archive("http://fake.url", dest, "repo", "tag", "app.zip")
+
+    assert not dest.exists()
+    assert not dest.with_suffix(".zip.part").exists()
+
 
 
 

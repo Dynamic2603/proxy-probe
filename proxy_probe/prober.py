@@ -112,6 +112,9 @@ def agy_probe(port: int, agy_bin: str, print_timeout: str, total_timeout: float)
             return str(e), -2
 
 
+PREFLIGHT_URL = "https://www.google.com/generate_204"
+
+
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
@@ -127,6 +130,22 @@ def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
             return country, str(data.get("ip", ""))
     except Exception:
         return "", ""
+
+
+def preflight_check(port: int, timeout: float = 4.0) -> bool:
+    """Fast connectivity test through proxy before launching heavy agy binary.
+
+    Returns True if the proxy tunnel is alive (can reach external hosts).
+    """
+    proxy_url = f"http://127.0.0.1:{port}"
+    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    opener = urllib.request.build_opener(handler)
+    req = urllib.request.Request(PREFLIGHT_URL, headers={"User-Agent": USER_AGENT})
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.status in (200, 204)
+    except Exception:
+        return False
 
 
 def _tail_file(path: Path, n: int = 6, limit: int = 512) -> str:
@@ -199,19 +218,39 @@ def run_probe(
                 "note": f"движок не поднял порт: {note[:200]}",
             }
 
+        # Preflight: быстрая проверка связности туннеля перед запуском тяжёлого agy
+        preflight_ok = preflight_check(port, timeout=timeouts.get("preflight", 4.0))
+        if not preflight_ok:
+            return {
+                "result": RESULT_DEAD,
+                "country": "",
+                "ip_out": "",
+                "latency_ms": int((time.time() - t0) * 1000),
+                "note": "preflight: туннель не пропускает трафик",
+            }
+
+        # Geo-данные уже можно получить — туннель жив
+        country, ip_out = fetch_geo(port, timeouts.get("geo", 8.0))
+
         try:
             atext, arc = agy_probe(port, resolved_agy_bin, print_timeout, timeouts.get("probe", 45.0))
         except Exception as e:
             return {
                 "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
+                "country": country,
+                "ip_out": ip_out,
                 "latency_ms": int((time.time() - t0) * 1000),
                 "note": f"agy: {e}"[:160],
             }
 
         latency = int((time.time() - t0) * 1000)
         result = classify_agy(atext or "", arc)
+
+        # Если agy таймаутнул (rc == -1), но preflight прошёл — туннель жив,
+        # проблема в agy/API, а не в прокси → UNKNOWN, не DEAD
+        if arc == -1 and result == RESULT_DEAD:
+            result = RESULT_UNKNOWN
+
         raw_text = " ".join((atext or "").strip().split())
         if arc == -1:
             note = f"таймаут agy ({timeouts.get('probe', 45.0):.0f}с)"
@@ -223,7 +262,6 @@ def run_probe(
             note = f"rc={arc} (нет вывода)"
         else:
             note = ""
-        country, ip_out = fetch_geo(port, timeouts.get("geo", 8.0))
         return {
             "result": result,
             "country": country,

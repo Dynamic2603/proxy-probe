@@ -42,7 +42,8 @@ def test_classify_agy_order_and_word_boundaries() -> None:
 
 
 def test_classify_agy_return_codes() -> None:
-    # -1 means probe timeout
+    # -1 means probe timeout — classify_agy returns DEAD,
+    # but run_probe overrides to UNKNOWN when preflight passed
     assert prober.classify_agy("", -1) == RESULT_DEAD
     # -2 means launch error
     assert prober.classify_agy("failed to exec", -2) == RESULT_DEAD
@@ -59,3 +60,8 @@ def test_get_default_agy_bin() -> None:
     b2 = prober.get_default_agy_bin()
     assert b1 == b2
     prober.get_default_agy_bin.cache_clear()
+
+
+def test_preflight_check_import() -> None:
+    """Ensure preflight_check is importable and callable."""
+    assert callable(prober.preflight_check)

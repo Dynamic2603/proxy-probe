@@ -65,7 +65,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--group", type=int, action="append", default=[], help="id группы (можно несколько; иначе — выбор)"
     )
     ap.add_argument("--no-fetch", action="store_true", help="не обновлять подписки, использовать данные из БД Throne")
-    ap.add_argument("--timeout", type=float, default=50.0, help="секунд таймаут на одну проверку")
+    ap.add_argument("--timeout", type=float, default=35.0, help="секунд таймаут на одну проверку (по умолчанию 35)")
     ap.add_argument(
         "--agy-bin",
         type=str,
@@ -350,7 +350,16 @@ def main() -> None:
         return
 
     servers, to_probe, cached_counts, warnings = selection
-    timeouts = {"start": args.timeout, "probe": args.timeout, "geo": min(args.timeout, 10.0)}
+    timeouts = {
+        "start": min(args.timeout, 12.0),
+        "preflight": 4.0,
+        "probe": args.timeout,
+        "geo": min(args.timeout, 10.0),
+    }
+    # Синхронизировать print-timeout agy с таймаутом проверки, если не задан явно
+    print_timeout = args.print_timeout
+    if print_timeout == AGY_PRINT_TIMEOUT_DEFAULT and args.timeout != 35.0:
+        print_timeout = f"{int(args.timeout)}s"
     t0 = time.time()
 
     _execute_probe_pool(
@@ -358,7 +367,7 @@ def main() -> None:
         jobs=args.jobs,
         timeouts=timeouts,
         ctx=ctx,
-        print_timeout=args.print_timeout,
+        print_timeout=print_timeout,
     )
     dt = time.time() - t0
 

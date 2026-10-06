@@ -210,7 +210,7 @@ def _collect_and_select_servers(
     to_probe: list[Server] = []
     cached_counts = {res: 0 for res in ttl_map}
     for s in servers:
-        rec = cache.get_valid(s.host_port) if (cache and not args.refresh_cache) else None
+        rec = cache.get_valid_server(s) if (cache and not args.refresh_cache) else None
         if rec:
             cached_res = str(rec["result"])
             s.result = cached_res
@@ -238,6 +238,28 @@ def _collect_and_select_servers(
     return servers, to_probe, cached_counts, warnings
 
 
+def _probe_worker(
+    bin_path: str,
+    is_xray: bool,
+    import_obj: dict[str, Any],
+    run_root: Path,
+    timeouts: dict[str, float],
+    agy_bin: str,
+    print_timeout: str,
+) -> dict[str, Any]:
+    port = alloc_port()
+    return run_probe(
+        bin_path,
+        is_xray,
+        import_obj,
+        port,
+        run_root,
+        timeouts,
+        agy_bin=agy_bin,
+        print_timeout=print_timeout,
+    )
+
+
 def _execute_probe_pool(
     to_probe: list[Server],
     jobs: int,
@@ -253,17 +275,15 @@ def _execute_probe_pool(
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         for s in to_probe:
             bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
-            port = alloc_port()
             fut = ex.submit(
-                run_probe,
+                _probe_worker,
                 bin_path,
                 s.engine == "xray",
                 s.import_obj,
-                port,
                 run_root,
                 timeouts,
-                agy_bin=ctx.agy_bin,
-                print_timeout=print_timeout,
+                ctx.agy_bin,
+                print_timeout,
             )
             futures[fut] = s
 

@@ -64,23 +64,38 @@ def default_throne_dir() -> Path:
     return find_throne_dir()
 
 
+DEFAULT_SINGBOX_VERSION = "1.14.1"
+DEFAULT_XRAY_VERSION = "26.9.9"
+
+
 def detect_throne_versions(throne_dir: Path) -> tuple[str, str]:
     exe = throne_dir / "ThroneCore.exe"
-    if not exe.exists():
-        raise SystemExit(
-            f"ThroneCore.exe не найден: {exe}\n"
-            f"Укажите путь к Throne через --throne-dir <путь> или переменную THRONE_DIR"
-        )
-    try:
-        out = subprocess.run([str(exe)], capture_output=True, timeout=10, cwd=str(throne_dir))
-        txt = (out.stdout or b"").decode("utf-8", "replace")
-    except subprocess.TimeoutExpired as e:
-        raise SystemExit("ThroneCore.exe не вышел за 10 секунд — не могу узнать версии") from e
-    m_sb = re.search(r"sing-box:\s*v?([\d.]+)", txt)
-    m_xr = re.search(r"Xray-core:\s*v?([\d.]+)", txt)
-    if not m_sb or not m_xr:
-        raise SystemExit("Не удалось распознать версии из баннера ThroneCore.exe")
-    return m_sb.group(1), m_xr.group(1)
+    if exe.exists():
+        try:
+            out = subprocess.run([str(exe)], capture_output=True, timeout=10, cwd=str(throne_dir))
+            txt = (out.stdout or b"").decode("utf-8", "replace")
+            m_sb = re.search(r"sing-box:\s*v?([\d.]+)", txt)
+            m_xr = re.search(r"Xray-core:\s*v?([\d.]+)", txt)
+            if m_sb and m_xr:
+                return m_sb.group(1), m_xr.group(1)
+        except Exception:
+            pass
+
+    # Fallback к локальному манифесту бинарников или версиям по умолчанию
+    from .engines import app_bin_dir
+
+    manifest = app_bin_dir() / "current.json"
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text("utf-8"))
+            sb = data.get("singbox")
+            xr = data.get("xray")
+            if sb and xr:
+                return str(sb), str(xr)
+        except Exception:
+            pass
+
+    return DEFAULT_SINGBOX_VERSION, DEFAULT_XRAY_VERSION
 
 
 def get_db_snapshot(throne_dir: Path | None = None, force_refresh: bool = False) -> Path:

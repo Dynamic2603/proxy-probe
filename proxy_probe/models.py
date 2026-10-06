@@ -46,3 +46,34 @@ class Server:
     @property
     def host_port(self) -> str:
         return f"{self.server}:{self.server_port}"
+
+    @property
+    def cache_key(self) -> str:
+        if self.import_obj and isinstance(self.import_obj, dict):
+            ident: list[str] = []
+            for k in ("uuid", "password", "method", "flow"):
+                if val := self.import_obj.get(k):
+                    ident.append(f"{k}:{val}")
+            s = self.import_obj.get("settings")
+            if isinstance(s, dict):
+                for k in ("id", "password"):
+                    if val := s.get(k):
+                        ident.append(f"{k}:{val}")
+            tls = self.import_obj.get("tls")
+            if isinstance(tls, dict) and (sn := tls.get("server_name")):
+                ident.append(f"sni:{sn}")
+            ss = self.import_obj.get("streamSettings")
+            if isinstance(ss, dict):
+                for sk in ("tlsSettings", "realitySettings"):
+                    sub = ss.get(sk)
+                    if isinstance(sub, dict) and (sn := sub.get("serverName")):
+                        ident.append(f"sni:{sn}")
+            tr = self.import_obj.get("transport")
+            if isinstance(tr, dict) and (p := tr.get("path")):
+                ident.append(f"path:{p}")
+            if ident:
+                import hashlib
+
+                h = hashlib.sha256(";".join(ident).encode("utf-8")).hexdigest()[:8]
+                return f"{self.server}:{self.server_port}:{self.engine}:{h}"
+        return f"{self.server}:{self.server_port}:{self.engine}"

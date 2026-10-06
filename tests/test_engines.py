@@ -36,12 +36,25 @@ def test_build_xray_config() -> None:
 def test_xray_shorthand_to_v2ray() -> None:
     short = {
         "settings": {"address": "1.2.3.4", "port": 443, "id": "uuid-xyz"},
-        "streamSettings": {"network": "tcp", "security": "reality"},
+        "streamSettings": {
+            "network": "ws",
+            "security": "reality",
+            "wsSettings": {"path": "/ws", "host": "example.com"},
+        },
     }
     v2 = xray_shorthand_to_v2ray(short)
     assert v2["protocol"] == "vless"
     assert v2["settings"]["vnext"][0]["address"] == "1.2.3.4"
     assert v2["settings"]["vnext"][0]["users"][0]["id"] == "uuid-xyz"
+    assert v2["streamSettings"]["wsSettings"]["path"] == "/ws"
+    assert v2["streamSettings"]["wsSettings"]["host"] == "example.com"
+
+
+def test_build_singbox_config_mixed() -> None:
+    ob = {"type": "vless", "server": "1.1.1.1", "server_port": 443}
+    cfg = build_singbox_config(ob, 20050, "engine.log")
+    assert cfg["inbounds"][0]["type"] == "mixed"
+    assert cfg["inbounds"][0]["listen_port"] == 20050
 
 
 def test_app_bin_dir(tmp_path: Path) -> None:

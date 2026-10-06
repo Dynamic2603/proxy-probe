@@ -141,7 +141,7 @@ def parse_vless(link: str) -> tuple[str, dict]:
     if penc and penc != "none":
         out["packet_encoding"] = penc
     if net == "tcp" and flow and flow != "none" and "vision" in flow:
-        out["flow"] = flow
+        out["flow"] = "xtls-rprx-vision"
     if tls := _singbox_tls(sec, host, q):
         out["tls"] = tls
     if tr := _build_transport(net, q):
@@ -170,19 +170,41 @@ def parse_hysteria2(link: str) -> tuple[str, dict]:
 
 def parse_shadowsocks(link: str) -> tuple[str, dict]:
     _, cred, host, port, _, name = _parse_uri(link)
-    if not host or not port or not cred:
+    method, password = "aes-128-gcm", ""
+    if not port and host and not cred:
+        pad = "=" * ((-len(host)) % 4)
+        for fn in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                decoded = fn(host + pad).decode("utf-8", "replace")
+                if "@" in decoded and ":" in decoded:
+                    up, _, hp = decoded.partition("@")
+                    if ":" in up and ":" in hp:
+                        method, password = up.split(":", 1)
+                        h, p = hp.rsplit(":", 1)
+                        if p.isdigit():
+                            host, port = h.strip("[]"), int(p)
+                            break
+            except Exception:
+                pass
+
+    if not host or not port:
         return "sing-box", {}
-    dec = None
-    pad = "=" * ((-len(cred)) % 4)
-    try:
-        raw = base64.b64decode(cred + pad, validate=True).decode("utf-8", "replace")
-        if ":" in raw:
-            dec = raw
-    except Exception:
-        pass
-    if dec is None:
-        dec = cred
-    method, password = dec.split(":", 1) if ":" in dec else ("aes-128-gcm", dec)
+
+    if cred:
+        pad = "=" * ((-len(cred)) % 4)
+        dec = None
+        for fn in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                raw = fn(cred + pad).decode("utf-8", "replace")
+                if ":" in raw:
+                    dec = raw
+                    break
+            except Exception:
+                pass
+        if dec is None:
+            dec = cred
+        method, password = dec.split(":", 1) if ":" in dec else ("aes-128-gcm", dec)
+
     return "sing-box", {
         "type": "shadowsocks",
         "tag": name or f"{host}:{port}",
@@ -290,13 +312,16 @@ _MIN_BASE64_BODY_LEN = 80  # Минимальная длина строки дл
 
 def decode_body(data: bytes) -> str:
     txt = data.decode("utf-8", "replace")
-    if len(txt) > _MIN_BASE64_BODY_LEN and bool(re.fullmatch(r"[A-Za-z0-9+/=\r\n]*", txt)) and "://" not in txt:
-        try:
-            dec = base64.b64decode(re.sub(r"\s+", "", txt), validate=True).decode("utf-8", "replace")
-            if re.search(r"[a-z0-9]+://", dec, re.IGNORECASE):
-                return dec
-        except Exception:
-            pass
+    clean = re.sub(r"\s+", "", txt)
+    if len(clean) > _MIN_BASE64_BODY_LEN and "://" not in txt and bool(re.fullmatch(r"[A-Za-z0-9+/=\-_]*", clean)):
+        pad = "=" * ((-len(clean)) % 4)
+        for fn in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                dec = fn(clean + pad).decode("utf-8", "replace")
+                if re.search(r"[a-z0-9]+://", dec, re.IGNORECASE):
+                    return dec
+            except Exception:
+                pass
     return txt
 
 
@@ -333,9 +358,13 @@ def parse_subscription(data: bytes) -> list[tuple[str, dict]]:
 
 
 def extract_host_port(obj: dict) -> tuple[str, int]:
-    srv = obj.get("server") or (obj.get("settings") or {}).get("address") or ""
-    prt = obj.get("server_port") or (obj.get("settings") or {}).get("port") or 0
-    return str(srv), int(prt or 0)
+    srv = obj.get("server") or (obj.get("settings") or {}).get("address")
+    prt = obj.get("server_port") or (obj.get("settings") or {}).get("port")
+    peers = obj.get("peers")
+    if not srv and isinstance(peers, list) and peers and isinstance(peers[0], dict):
+        srv = peers[0].get("address") or peers[0].get("server")
+        prt = peers[0].get("port")
+    return str(srv or ""), int(prt or 0)
 
 
 def extract_tag(obj: dict) -> str:

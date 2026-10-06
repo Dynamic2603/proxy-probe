@@ -238,7 +238,7 @@ def build_singbox_config(outbound: dict[str, Any], port: int, log_path: str) -> 
     ob["tag"] = "probe"
     return {
         "log": {"level": "error", "output": log_path},
-        "inbounds": [{"type": "http", "tag": "in", "listen": "127.0.0.1", "listen_port": port}],
+        "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": port}],
         "outbounds": [ob, {"type": "direct", "tag": "direct"}],
         "route": {"final": "probe"},
     }
@@ -255,7 +255,7 @@ def build_xray_config(outbound: dict[str, Any], port: int, log_path: str) -> dic
 
 def xray_shorthand_to_v2ray(o: dict[str, Any]) -> dict[str, Any]:
     s = o.get("settings", {})
-    ss = o.get("streamSettings", {})
+    ss = dict(o.get("streamSettings", {}))
     net = ss.get("network", "tcp")
     sec = ss.get("security") or "none"
     addr = s.get("address") or ""
@@ -265,31 +265,32 @@ def xray_shorthand_to_v2ray(o: dict[str, Any]) -> dict[str, Any]:
         "encryption": s.get("encryption", "none"),
         "flow": s.get("flow", ""),
     }
-    stream: dict[str, Any] = {"network": "tcp" if net == "raw" else net, "security": sec}
+    ss["network"] = "tcp" if net in ("raw", "none") else net
+    ss["security"] = sec
     if net == "xhttp":
         xh = dict(ss.get("xhttpSettings") or {})
         xh.setdefault("path", "/")
-        stream["xhttpSettings"] = xh
+        ss["xhttpSettings"] = xh
     if sec == "tls":
         ts = dict(ss.get("tlsSettings") or {})
         ts.setdefault("serverName", addr)
-        stream["tlsSettings"] = ts
+        ss["tlsSettings"] = ts
     elif sec == "reality":
         rs = ss.get("realitySettings") or {}
         rs2: dict[str, Any] = {
             "serverName": rs.get("serverName") or addr,
             "fingerprint": rs.get("fingerprint") or "",
-            "publicKey": rs.get("password") or "",
+            "publicKey": rs.get("password") or rs.get("publicKey") or "",
             "spiderX": rs.get("spiderX") or "/",
         }
-        if sid := rs.get("shortId"):
+        if sid := (rs.get("shortId") or rs.get("short_id")):
             rs2["shortId"] = sid
-        stream["realitySettings"] = rs2
+        ss["realitySettings"] = rs2
     return {
         "protocol": "vless",
         "tag": "probe",
         "settings": {"vnext": [{"address": addr, "port": port, "users": [user]}]},
-        "streamSettings": stream,
+        "streamSettings": ss,
     }
 
 

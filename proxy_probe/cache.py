@@ -66,6 +66,12 @@ class ResultCache:
     def is_valid(self, server_key: str, now: _dt.datetime | None = None) -> bool:
         return self.get_valid(server_key, now=now) is not None
 
+    def get_valid_server(self, server: Server, now: _dt.datetime | None = None) -> dict | None:
+        rec = self.get_valid(server.cache_key, now=now)
+        if rec:
+            return rec
+        return self.get_valid(server.host_port, now=now)
+
     def put(
         self, server_key: str, record: dict, force: bool = False, now: _dt.datetime | None = None
     ) -> None:
@@ -92,12 +98,12 @@ class ResultCache:
         }
         if server.result == RESULT_OK:
             rec["engine"] = server.engine
-            cur = self.entries.get(server.host_port) or {}
+            cur = self.entries.get(server.cache_key) or self.entries.get(server.host_port) or {}
             rec["import_obj"] = server.import_obj or cur.get("import_obj")
-        self.put(server.host_port, rec, force=True)
+        self.put(server.cache_key, rec, force=True)
 
     def enrich_from_server(self, server: Server) -> bool:
-        rec = self.entries.get(server.host_port)
+        rec = self.entries.get(server.cache_key) or self.entries.get(server.host_port)
         if not rec or rec.get("result") != RESULT_OK:
             return False
         if server.import_obj and not rec.get("import_obj"):

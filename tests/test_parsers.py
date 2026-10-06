@@ -109,10 +109,40 @@ def test_parse_shadowsocks_formats() -> None:
     assert obj["method"] == "aes-128-gcm"
     assert obj["password"] == "pass123"
 
-    # 3. Plain text format: method:password@host:port
-    link_plain = "ss://aes-128-gcm:pass123@1.2.3.4:8388#SS-Plain"
-    eng, obj = link_to_outbound(link_plain)
+    # 4. Legacy format: ss://BASE64(method:password@host:port)#tag
+    link_legacy = "ss://YmYtY2ZiOnRlc3RAMTkyLjE2OC4xMDAuMTo4ODg4#SS-Legacy"
+    eng, obj = link_to_outbound(link_legacy)
     assert eng == "sing-box"
-    assert obj["method"] == "aes-128-gcm"
-    assert obj["password"] == "pass123"
+    assert obj["type"] == "shadowsocks"
+    assert obj["method"] == "bf-cfb"
+    assert obj["password"] == "test"
+    assert obj["server"] == "192.168.100.1"
+    assert obj["server_port"] == 8888
+
+
+def test_link_to_outbound_vless_flow_normalization() -> None:
+    link = "vless://uuid-1@1.2.3.4:443?security=reality&flow=xtls-rprx-vision-udp443#NormFlow"
+    eng, obj = link_to_outbound(link)
+    assert eng == "sing-box"
+    assert obj["flow"] == "xtls-rprx-vision"
+
+
+def test_decode_body_urlsafe_base64() -> None:
+    import base64
+
+    text = "vless://test@1.2.3.4:443?security=reality#Tag1\nvless://test2@5.6.7.8:443#Tag2\n" * 3
+    # Use urlsafe base64 with - and _
+    b64_urlsafe = base64.urlsafe_b64encode(text.encode("utf-8"))
+    decoded = decode_body(b64_urlsafe)
+    assert "vless://test@1.2.3.4:443" in decoded
+
+
+def test_extract_host_port_wireguard() -> None:
+    wg_obj = {
+        "type": "wireguard",
+        "peers": [{"address": "10.0.0.1", "port": 51820, "public_key": "xyz"}],
+    }
+    host, port = extract_host_port(wg_obj)
+    assert host == "10.0.0.1"
+    assert port == 51820
 

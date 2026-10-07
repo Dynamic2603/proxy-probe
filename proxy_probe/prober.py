@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from functools import cache
@@ -24,6 +25,36 @@ from .models import (
     UNKNOWN_PATTERNS,
 )
 from .parsers import USER_AGENT
+
+
+class ProcessRegistry:
+    """Потокобезопасный реестр запущенных процессов для немедленной остановки."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: set[subprocess.Popen[Any]] = set()
+
+    def register(self, proc: subprocess.Popen[Any]) -> None:
+        with self._lock:
+            self._procs.add(proc)
+
+    def unregister(self, proc: subprocess.Popen[Any]) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+    def kill_all(self) -> None:
+        with self._lock:
+            procs = list(self._procs)
+            self._procs.clear()
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.kill()
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._procs)
+
 
 
 def find_agy_bin() -> str:
@@ -76,7 +107,16 @@ def classify_agy(out: str, rc: int) -> str:
     return RESULT_OK
 
 
-def agy_probe(port: int, agy_bin: str, print_timeout: str, total_timeout: float) -> tuple[str, int]:
+def agy_probe(
+    port: int,
+    agy_bin: str,
+    print_timeout: str,
+    total_timeout: float,
+    stop_event: threading.Event | None = None,
+    registry: ProcessRegistry | None = None,
+) -> tuple[str, int]:
+    if stop_event is not None and stop_event.is_set():
+        return "", -1
     env = dict(os.environ)
     proxy_url = f"http://127.0.0.1:{port}"
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -95,25 +135,37 @@ def agy_probe(port: int, agy_bin: str, print_timeout: str, total_timeout: float)
     ]
     with tempfile.TemporaryDirectory(prefix="pxp_probe_", ignore_cleanup_errors=True) as cwd:
         try:
-            res = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=cwd,
                 env=env,
-                timeout=total_timeout,
             )
-            out_txt = res.stdout.decode("utf-8", errors="replace").strip() if res.stdout else ""
-            err_txt = res.stderr.decode("utf-8", errors="replace").strip() if res.stderr else ""
-            combined = f"{out_txt}\n{err_txt}" if out_txt and err_txt else (out_txt or err_txt)
-            return combined, res.returncode
-        except subprocess.TimeoutExpired:
-            return "", -1
+            if registry is not None:
+                registry.register(proc)
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=total_timeout)
+                if stop_event is not None and stop_event.is_set():
+                    return "", -1
+                out_txt = stdout_data.decode("utf-8", errors="replace").strip() if stdout_data else ""
+                err_txt = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+                combined = f"{out_txt}\n{err_txt}" if out_txt and err_txt else (out_txt or err_txt)
+                return combined, proc.returncode
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.communicate()
+                return "", -1
+            finally:
+                if registry is not None:
+                    registry.unregister(proc)
         except OSError as e:
             return str(e), -2
 
 
 PREFLIGHT_URL = "https://www.google.com/generate_204"
-
 
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
@@ -165,7 +217,17 @@ def run_probe(
     timeouts: dict[str, float],
     agy_bin: str | None = None,
     print_timeout: str = AGY_PRINT_TIMEOUT_DEFAULT,
+    stop_event: threading.Event | None = None,
+    registry: ProcessRegistry | None = None,
 ) -> dict[str, Any]:
+    if stop_event is not None and stop_event.is_set():
+        return {
+            "result": RESULT_DEAD,
+            "country": "",
+            "ip_out": "",
+            "latency_ms": 0,
+            "note": "проверка отменена",
+        }
     resolved_agy_bin = agy_bin or get_default_agy_bin()
     d = run_root / f"p{port}"
     d.mkdir(parents=True, exist_ok=True)
@@ -195,6 +257,8 @@ def run_probe(
             stderr=subprocess.STDOUT,
             env=clean_env,
         )
+        if registry is not None:
+            registry.register(proc)
     except OSError as e:
         if out_f is not None:
             with contextlib.suppress(Exception):
@@ -208,7 +272,24 @@ def run_probe(
         }
 
     try:
-        if not wait_port(port, proc, timeouts.get("start", 12.0)):
+        if stop_event is not None and stop_event.is_set():
+            return {
+                "result": RESULT_DEAD,
+                "country": "",
+                "ip_out": "",
+                "latency_ms": 0,
+                "note": "проверка отменена",
+            }
+
+        if not wait_port(port, proc, timeouts.get("start", 12.0), stop_event=stop_event):
+            if stop_event is not None and stop_event.is_set():
+                return {
+                    "result": RESULT_DEAD,
+                    "country": "",
+                    "ip_out": "",
+                    "latency_ms": 0,
+                    "note": "проверка отменена",
+                }
             note = (_tail_file(log_path) + "\n" + _tail_file(out_path)).strip()
             return {
                 "result": RESULT_DEAD,
@@ -216,6 +297,15 @@ def run_probe(
                 "ip_out": "",
                 "latency_ms": 0,
                 "note": f"движок не поднял порт: {note[:200]}",
+            }
+
+        if stop_event is not None and stop_event.is_set():
+            return {
+                "result": RESULT_DEAD,
+                "country": "",
+                "ip_out": "",
+                "latency_ms": 0,
+                "note": "проверка отменена",
             }
 
         # Preflight: быстрая проверка связности туннеля перед запуском тяжёлого agy
@@ -229,11 +319,26 @@ def run_probe(
                 "note": "preflight: туннель не пропускает трафик",
             }
 
+        if stop_event is not None and stop_event.is_set():
+            return {
+                "result": RESULT_DEAD,
+                "country": "",
+                "ip_out": "",
+                "latency_ms": 0,
+                "note": "проверка отменена",
+            }
+
         # Geo-данные уже можно получить — туннель жив
         country, ip_out = fetch_geo(port, timeouts.get("geo", 8.0))
-
         try:
-            atext, arc = agy_probe(port, resolved_agy_bin, print_timeout, timeouts.get("probe", 45.0))
+            atext, arc = agy_probe(
+                port,
+                resolved_agy_bin,
+                print_timeout,
+                timeouts.get("probe", 45.0),
+                stop_event=stop_event,
+                registry=registry,
+            )
         except Exception as e:
             return {
                 "result": RESULT_DEAD,
@@ -241,6 +346,15 @@ def run_probe(
                 "ip_out": ip_out,
                 "latency_ms": int((time.time() - t0) * 1000),
                 "note": f"agy: {e}"[:160],
+            }
+
+        if stop_event is not None and stop_event.is_set():
+            return {
+                "result": RESULT_DEAD,
+                "country": "",
+                "ip_out": "",
+                "latency_ms": 0,
+                "note": "проверка отменена",
             }
 
         latency = int((time.time() - t0) * 1000)
@@ -262,6 +376,7 @@ def run_probe(
             note = f"rc={arc} (нет вывода)"
         else:
             note = ""
+
         return {
             "result": result,
             "country": country,
@@ -274,11 +389,17 @@ def run_probe(
             with contextlib.suppress(Exception):
                 out_f.close()
         if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
+            if registry is not None:
+                registry.unregister(proc)
+            if stop_event is not None and stop_event.is_set():
                 with contextlib.suppress(Exception):
                     proc.kill()
-                with contextlib.suppress(Exception):
-                    proc.wait(timeout=5)
+            else:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=5)

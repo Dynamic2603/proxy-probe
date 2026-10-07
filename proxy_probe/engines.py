@@ -294,9 +294,16 @@ def xray_shorthand_to_v2ray(o: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def wait_port(port: int, proc: subprocess.Popen | None, timeout: float = 12.0) -> bool:
+def wait_port(
+    port: int,
+    proc: subprocess.Popen | None,
+    timeout: float = 12.0,
+    stop_event: threading.Event | None = None,
+) -> bool:
     end = time.time() + timeout
     while time.time() < end:
+        if stop_event is not None and stop_event.is_set():
+            return False
         if proc is not None and proc.poll() is not None:
             return False
         try:
@@ -304,5 +311,8 @@ def wait_port(port: int, proc: subprocess.Popen | None, timeout: float = 12.0) -
                 return True
         except OSError:
             pass
+        if stop_event is not None and stop_event.is_set():
+            return False
         time.sleep(0.2)
     return False
+

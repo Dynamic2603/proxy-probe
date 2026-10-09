@@ -235,7 +235,7 @@ def parse_trojan(link: str) -> tuple[str, dict]:
 
 def parse_vmess(link: str) -> tuple[str, dict]:
     try:
-        b64 = link.strip()[len("vmess://"):]
+        b64 = link.strip()[len("vmess://") :]
         j = json.loads(base64.b64decode(b64, validate=False).decode("utf-8", "replace"))
         net = j.get("net", "tcp")
         host = j.get("add", "")
@@ -336,7 +336,7 @@ def parse_outbound_doc(doc: str) -> list[tuple[str, dict]]:
             return []
         objs = j.get("outbounds", [j]) if isinstance(j, dict) else j
         res: list[tuple[str, dict]] = []
-        for o in (objs if isinstance(objs, list) else [objs]):
+        for o in objs if isinstance(objs, list) else [objs]:
             if isinstance(o, dict):
                 if "protocol" in o:
                     res.append(("xray", o))

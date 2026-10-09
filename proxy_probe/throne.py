@@ -25,10 +25,6 @@ def set_throne_dir(path: Path | str | None) -> None:
     _snapshot_source_dir = None
 
 
-def reset_throne_state() -> None:
-    set_throne_dir(None)
-
-
 def find_throne_dir(custom_path: Path | str | None = None) -> Path:
     if custom_path:
         p = Path(custom_path).resolve()
@@ -112,8 +108,7 @@ def get_db_snapshot(throne_dir: Path | None = None, force_refresh: bool = False)
     src = base_dir / "config" / "throne.db"
     if not src.exists():
         raise SystemExit(
-            f"throne.db не найден: {src}\n"
-            f"Укажите путь к Throne через --throne-dir <путь> или переменную THRONE_DIR"
+            f"throne.db не найден: {src}\nУкажите путь к Throne через --throne-dir <путь> или переменную THRONE_DIR"
         )
     dst = Path(tempfile.gettempdir()) / APP_NAME / "snapshot" / "throne.db"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -143,9 +138,7 @@ def read_profiles_for_group(gid: int, group_name: str = "") -> list[Server]:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute(
-            "SELECT type, name, outbound_json FROM profiles WHERE gid=? ORDER BY id", (gid,)
-        ).fetchall()
+        rows = con.execute("SELECT type, name, outbound_json FROM profiles WHERE gid=? ORDER BY id", (gid,)).fetchall()
     finally:
         con.close()
     out: list[Server] = []

@@ -69,9 +69,7 @@ def test_canonical_structure_mixed_types() -> None:
 
 def test_gather_sources_with_prefetched() -> None:
     # Интеграционный тест: проверяет сквозную цепочку gather_sources -> parse_subscription -> parse_vless
-    groups = [
-        {"id": 10, "name": "Test Group", "url": "http://example.com/sub"}
-    ]
+    groups = [{"id": 10, "name": "Test Group", "url": "http://example.com/sub"}]
     # Simple vless link payload
     link = "vless://00000000-0000-0000-0000-000000000000@1.1.1.1:443?security=none#Server1"
     prefetched = {"http://example.com/sub": link.encode("utf-8")}

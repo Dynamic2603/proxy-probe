@@ -88,6 +88,7 @@ def verify_file_against_upstream(file_path: Path, repo: str, tag: str, asset_nam
     print(f"  ✓ SHA-256 верифицирован по upstream ({expected_sha[:12]}...)")
     return True
 
+
 _port_lock = threading.Lock()
 _next_port = [20000]
 
@@ -187,9 +188,7 @@ def _download_and_verify_archive(
     tmp.replace(dest)
 
 
-def ensure_binaries(
-    ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path | None = None
-) -> tuple[Path, Path]:
+def ensure_binaries(ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path | None = None) -> tuple[Path, Path]:
     target_bin_dir = bin_dir or app_bin_dir()
     sb_exe = target_bin_dir / "sing-box.exe"
     xr_exe = target_bin_dir / "xray.exe"
@@ -315,4 +314,3 @@ def wait_port(
             return False
         time.sleep(0.2)
     return False
-

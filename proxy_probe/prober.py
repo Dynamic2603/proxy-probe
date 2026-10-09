@@ -56,7 +56,6 @@ class ProcessRegistry:
             return len(self._procs)
 
 
-
 def find_agy_bin() -> str:
     env_bin = os.environ.get("AGY_BIN")
     if env_bin and Path(env_bin).is_file():
@@ -166,6 +165,7 @@ def agy_probe(
 
 
 PREFLIGHT_URL = "https://www.google.com/generate_204"
+
 
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"

@@ -49,7 +49,7 @@ ignore = ["RUF001", "RUF002", "RUF003", "SIM115"]
 
 [tool.vulture]
 exclude = [".venv"]
-ignore_names = ["group_id", "row_factory"]
+ignore_names = ["group_id", "row_factory", "return_value"]
 min_confidence = 60
 paths = ["proxy_probe", "tests"]
 

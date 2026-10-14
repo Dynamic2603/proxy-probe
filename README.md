@@ -59,6 +59,11 @@ uv run pxp --refresh-cache
    TTL per status: OK — 3 days, BLOCK — 7 days, DEAD — 1 day (`--ttl-ok`, `--ttl-blocked`, `--ttl-dead`; 0 = never expires; `UNKNOWN` is never cached).
    On collision of the same `host:port` across multiple configurations, resolution priority is: `BLOCK` > `AGY-OK` > `DEAD` (a broken duplicate profile does not downgrade an active BLOCK to DEAD).
    Cached `AGY-OK` servers are included in `proxy-ok.txt` alongside freshly tested ones.
+7. **Quota Exhaustion Protection (`Individual quota reached`)**:
+   - Automatically detects and uses the lightest available Flash model via `detect_best_agy_model` (configurable via `--agy-model` or `AGY_MODEL` env).
+   - Rate limit smoothing via a concurrency semaphore for `agy` execution (`--agy-concurrency 2`), preventing burst HTTP 429 errors.
+   - Fail-fast `QuotaCircuitBreaker`: when an account quota exhaustion error is encountered, subsequent `agy` invocations are immediately skipped; servers are verified via fast preflight/geo and marked `UNKNOWN` without cache pollution.
+   - Pre-flight quota sanity check (`--skip-precheck` to bypass) detects quota status before initiating full batch scans.
 
 ---
 

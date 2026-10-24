@@ -33,6 +33,10 @@ def write_report(
         f"- Дата: {_dt.datetime.now(_dt.UTC).astimezone().isoformat(timespec='seconds')}",
         f"- Проверено серверов: {server_stat}",
     ]
+    fresh_cnt = sum(1 for s in servers if s.source == "fresh")
+    db_cnt = sum(1 for s in servers if s.source == "db")
+    if fresh_cnt or db_cnt:
+        lines.append(f"- Состав пула: {len(servers)} серверов (онлайн: {fresh_cnt}, из БД Throne: {db_cnt})")
     if cached_counts:
         hit_txt = ", ".join(f"{k} = {v}" for k, v in cached_counts.items() if v)
         if hit_txt:
@@ -90,13 +94,16 @@ def write_import_file(
             obj = entry.get("import_obj")
             if not isinstance(obj, dict):
                 continue
-            eng = entry.get("engine")
+            eng = str(entry.get("engine") or "")
             if eng == "xray" or (not eng and obj.get("protocol")):
                 xr.append(obj)
             else:
                 sb.append(obj)
     elif fallback_servers:
-        ok = sorted([s for s in fallback_servers if s.result == RESULT_OK], key=lambda s: s.host_port)
+        ok = sorted(
+            [s for s in fallback_servers if s.result == RESULT_OK],
+            key=lambda s: s.host_port,
+        )
         sb = [s.import_obj for s in ok if s.engine == "sing-box"]
         xr = [s.import_obj for s in ok if s.engine == "xray"]
 

@@ -127,8 +127,24 @@ def read_groups() -> list[dict]:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute("SELECT id, name, url FROM groups WHERE archive=0 ORDER BY id").fetchall()
-        return [dict(r) for r in rows]
+        rows = con.execute(
+            "SELECT id, name, url, sub_options_json FROM groups WHERE archive=0 ORDER BY id"
+        ).fetchall()
+        result: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            raw_opt = d.pop("sub_options_json", None)
+            remove_insecure = False
+            if raw_opt:
+                try:
+                    opts = json.loads(raw_opt)
+                    if isinstance(opts, dict):
+                        remove_insecure = bool(opts.get("remove_insecure", False))
+                except Exception:
+                    pass
+            d["remove_insecure"] = remove_insecure
+            result.append(d)
+        return result
     finally:
         con.close()
 

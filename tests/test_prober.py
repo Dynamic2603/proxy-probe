@@ -137,6 +137,37 @@ def test_run_probe_with_stop_event(tmp_path: prober.Path) -> None:
     assert "проверка отменена" in res["note"]
 
 
+def test_run_probe_in_memory_failed_start() -> None:
+    res = prober.run_probe(
+        "non_existent_engine_executable_12345",
+        False,
+        {"type": "direct"},
+        21998,
+    )
+    assert res["result"] == RESULT_DEAD
+    assert "движок не запустился" in res["note"]
+
+
+def test_run_probe_in_memory_wait_port_failure() -> None:
+    import sys
+    from unittest.mock import patch
+
+    # Мок процесса, который ничего не слушает, но пишет ошибку в stdout
+    with (
+        patch("proxy_probe.prober.wait_port", return_value=False),
+        patch("proxy_probe.prober.preflight_check", return_value=False),
+    ):
+        res = prober.run_probe(
+            sys.executable,
+            False,
+            {"type": "direct"},
+            21997,
+            timeouts={"start": 0.1, "preflight": 0.1},
+        )
+        assert res["result"] == RESULT_DEAD
+        assert "движок не поднял порт" in res["note"]
+
+
 def test_probe_tcp_port_success() -> None:
     import socket
 

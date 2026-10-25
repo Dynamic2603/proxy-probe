@@ -232,20 +232,24 @@ def ensure_binaries(ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path
     return sb_exe, xr_exe
 
 
-def build_singbox_config(outbound: dict[str, Any], port: int, log_path: str) -> dict[str, Any]:
+def build_singbox_config(outbound: dict[str, Any], port: int, log_path: str = "") -> dict[str, Any]:
     ob = dict(outbound)
     ob["tag"] = "probe"
     return {
-        "log": {"level": "error", "output": log_path},
+        "log": {"level": "error", "output": log_path} if log_path else {"level": "error"},
         "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": port}],
         "outbounds": [ob, {"type": "direct", "tag": "direct"}],
         "route": {"final": "probe"},
     }
 
 
-def build_xray_config(outbound: dict[str, Any], port: int, log_path: str) -> dict[str, Any]:
+def build_xray_config(outbound: dict[str, Any], port: int, log_path: str = "") -> dict[str, Any]:
     return {
-        "log": {"loglevel": "error", "access": "", "error": log_path},
+        "log": (
+            {"loglevel": "error", "access": "", "error": log_path}
+            if log_path
+            else {"loglevel": "error", "access": ""}
+        ),
         "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "http"}],
         "outbounds": [outbound],
         "routing": {"domainStrategy": "AsIs", "rules": []},

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from collections import deque
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
@@ -390,12 +391,14 @@ def preflight_check(port: int, timeout: float = 4.0) -> bool:
         return False
 
 
-def _tail_file(path: Path, n: int = 6, limit: int = 512) -> str:
+def _drain_output(pipe: Any, buf: deque[str]) -> None:
     try:
-        lines = path.read_text("utf-8", "replace").splitlines()
-        return "\n".join(lines[-n:])[:limit]
+        for raw_line in iter(pipe.readline, b""):
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if line:
+                buf.append(line)
     except Exception:
-        return ""
+        pass
 
 
 def run_probe(
@@ -403,8 +406,8 @@ def run_probe(
     is_xray: bool,
     import_obj: dict[str, Any],
     port: int,
-    run_root: Path,
-    timeouts: dict[str, float],
+    run_root: Path | None = None,
+    timeouts: dict[str, float] | None = None,
     agy_bin: str | None = None,
     print_timeout: str = AGY_PRINT_TIMEOUT_DEFAULT,
     agy_model: str | None = None,
@@ -421,41 +424,44 @@ def run_probe(
             "latency_ms": 0,
             "note": "проверка отменена",
         }
+    if timeouts is None:
+        timeouts = {}
     resolved_agy_bin = agy_bin or get_default_agy_bin()
-    d = run_root / f"p{port}"
-    d.mkdir(parents=True, exist_ok=True)
-    log_rel = "engine.log"
     if is_xray:
         test_out = xray_shorthand_to_v2ray(import_obj)
-        cfg = build_xray_config(test_out, port, log_rel)
+        cfg = build_xray_config(test_out, port)
+        cmd = [engine_bin, "run", "-c", "stdin:"]
     else:
-        cfg = build_singbox_config(import_obj, port, log_rel)
-    (d / "config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
-    out_path = d / "engine.out"
-    log_path = d / log_rel
+        cfg = build_singbox_config(import_obj, port)
+        cmd = [engine_bin, "run", "-c", "stdin"]
+
+    cfg_bytes = json.dumps(cfg, ensure_ascii=False).encode("utf-8")
+    log_buffer: deque[str] = deque(maxlen=30)
+    drain_thread: threading.Thread | None = None
+    proc: subprocess.Popen[bytes] | None = None
     t0 = time.time()
-    out_f = None
-    proc = None
     try:
-        out_f = open(out_path, "wb")
         clean_env = {
             k: v
             for k, v in os.environ.items()
             if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
         }
         proc = subprocess.Popen(
-            [engine_bin, "run", "-c", "config.json"],
-            cwd=str(d),
-            stdout=out_f,
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=clean_env,
         )
+        if proc.stdin is not None:
+            proc.stdin.write(cfg_bytes)
+            proc.stdin.close()
+        if proc.stdout is not None:
+            drain_thread = threading.Thread(target=_drain_output, args=(proc.stdout, log_buffer), daemon=True)
+            drain_thread.start()
         if registry is not None:
             registry.register(proc)
     except OSError as e:
-        if out_f is not None:
-            with contextlib.suppress(Exception):
-                out_f.close()
         return {
             "result": RESULT_DEAD,
             "country": "",
@@ -483,7 +489,7 @@ def run_probe(
                     "latency_ms": 0,
                     "note": "проверка отменена",
                 }
-            note = (_tail_file(log_path) + "\n" + _tail_file(out_path)).strip()
+            note = "\n".join(log_buffer).strip()
             return {
                 "result": RESULT_DEAD,
                 "country": "",
@@ -502,7 +508,7 @@ def run_probe(
             }
 
         # Preflight: быстрая проверка связности туннеля перед запуском тяжёлого agy
-        preflight_ok = preflight_check(port, timeout=timeouts.get("preflight", 4.0))
+        preflight_ok = preflight_check(port, timeout=timeouts.get("preflight", 2.5))
         if not preflight_ok:
             return {
                 "result": RESULT_DEAD,
@@ -609,9 +615,6 @@ def run_probe(
             "note": note,
         }
     finally:
-        if out_f is not None:
-            with contextlib.suppress(Exception):
-                out_f.close()
         if proc is not None:
             if registry is not None:
                 registry.unregister(proc)
@@ -627,3 +630,8 @@ def run_probe(
                         proc.kill()
                     with contextlib.suppress(Exception):
                         proc.wait(timeout=5)
+            if proc.stdout is not None:
+                with contextlib.suppress(Exception):
+                    proc.stdout.close()
+            if drain_thread is not None and drain_thread.is_alive():
+                drain_thread.join(timeout=0.2)

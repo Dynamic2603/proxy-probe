@@ -57,6 +57,16 @@ def test_build_singbox_config_mixed() -> None:
     assert cfg["inbounds"][0]["listen_port"] == 20050
 
 
+def test_build_configs_in_memory() -> None:
+    ob_sb = {"type": "vless", "server": "1.1.1.1", "server_port": 443}
+    cfg_sb = build_singbox_config(ob_sb, 20050)
+    assert cfg_sb["log"] == {"level": "error"}
+
+    ob_xr = {"protocol": "vless", "settings": {}}
+    cfg_xr = build_xray_config(ob_xr, 20060)
+    assert cfg_xr["log"] == {"loglevel": "error", "access": ""}
+
+
 def test_app_bin_dir(tmp_path: Path) -> None:
     from proxy_probe.engines import app_bin_dir
 

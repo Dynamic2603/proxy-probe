@@ -28,6 +28,7 @@ from .models import (
     RESULT_UNKNOWN,
     UNKNOWN_PATTERNS,
     QuotaInfo,
+    country_code_to_emoji,
     parse_quota_info,
 )
 from .parsers import USER_AGENT
@@ -358,7 +359,7 @@ def batch_probe_tcp(
     return results
 
 
-def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
+def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str, str, str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     opener = urllib.request.build_opener(handler)
@@ -366,13 +367,24 @@ def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:
     try:
         with opener.open(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
+            country_code = str(data.get("country_code", "")).strip().upper()
             flag = data.get("flag", "")
             if isinstance(flag, dict):
                 flag = flag.get("emoji", "")
+            if not flag and country_code:
+                flag = country_code_to_emoji(country_code)
             country = f"{flag} {data.get('country', '')}".strip()
-            return country, str(data.get("ip", ""))
+            ip_out = str(data.get("ip", "")).strip()
+            city = str(data.get("city", "")).strip()
+            conn = data.get("connection")
+            org = ""
+            if isinstance(conn, dict):
+                org = str(conn.get("org") or conn.get("isp") or "").strip()
+            if not org:
+                org = str(data.get("org") or "").strip()
+            return country, ip_out, country_code, city, org
     except Exception:
-        return "", ""
+        return "", "", "", "", ""
 
 
 def preflight_check(port: int, timeout: float = 4.0) -> bool:
@@ -421,6 +433,9 @@ def run_probe(
             "result": RESULT_DEAD,
             "country": "",
             "ip_out": "",
+            "country_code": "",
+            "city": "",
+            "org": "",
             "latency_ms": 0,
             "note": "проверка отменена",
         }
@@ -466,6 +481,9 @@ def run_probe(
             "result": RESULT_DEAD,
             "country": "",
             "ip_out": "",
+            "country_code": "",
+            "city": "",
+            "org": "",
             "latency_ms": 0,
             "note": f"движок не запустился: {e}",
         }
@@ -476,6 +494,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": 0,
                 "note": "проверка отменена",
             }
@@ -486,6 +507,9 @@ def run_probe(
                     "result": RESULT_DEAD,
                     "country": "",
                     "ip_out": "",
+                    "country_code": "",
+                    "city": "",
+                    "org": "",
                     "latency_ms": 0,
                     "note": "проверка отменена",
                 }
@@ -494,6 +518,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": 0,
                 "note": f"движок не поднял порт: {note[:200]}",
             }
@@ -503,6 +530,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": 0,
                 "note": "проверка отменена",
             }
@@ -514,6 +544,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": int((time.time() - t0) * 1000),
                 "note": "preflight: туннель не пропускает трафик",
             }
@@ -523,18 +556,31 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": 0,
                 "note": "проверка отменена",
             }
 
         # Geo-данные уже можно получить — туннель жив
-        country, ip_out = fetch_geo(port, timeouts.get("geo", 8.0))
+        geo_res = fetch_geo(port, timeouts.get("geo", 8.0))
+        if len(geo_res) == 5:
+            country, ip_out, country_code, city, org = geo_res
+        elif len(geo_res) == 2:
+            country, ip_out = geo_res
+            country_code, city, org = "", "", ""
+        else:
+            country, ip_out, country_code, city, org = "", "", "", "", ""
 
         if circuit_breaker is not None and circuit_breaker.is_tripped:
             return {
                 "result": RESULT_UNKNOWN,
                 "country": country,
                 "ip_out": ip_out,
+                "country_code": country_code,
+                "city": city,
+                "org": org,
                 "latency_ms": int((time.time() - t0) * 1000),
                 "note": "пропущено (квота agy исчерпана)",
             }
@@ -566,6 +612,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": country,
                 "ip_out": ip_out,
+                "country_code": country_code,
+                "city": city,
+                "org": org,
                 "latency_ms": int((time.time() - t0) * 1000),
                 "note": f"agy: {e}"[:160],
             }
@@ -575,6 +624,9 @@ def run_probe(
                 "result": RESULT_DEAD,
                 "country": "",
                 "ip_out": "",
+                "country_code": "",
+                "city": "",
+                "org": "",
                 "latency_ms": 0,
                 "note": "проверка отменена",
             }
@@ -611,6 +663,9 @@ def run_probe(
             "result": result,
             "country": country,
             "ip_out": ip_out,
+            "country_code": country_code,
+            "city": city,
+            "org": org,
             "latency_ms": latency,
             "note": note,
         }

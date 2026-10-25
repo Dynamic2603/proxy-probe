@@ -81,6 +81,20 @@ def parse_quota_info(text: str) -> QuotaInfo:
     return QuotaInfo(is_exhausted=is_exhausted, reset_after=reset_after)
 
 
+def country_code_to_emoji(code: str) -> str:
+    """Преобразует 2-буквенный ISO код страны (напр. 'DE') в флаг emoji (🇩🇪)."""
+    code = (code or "").strip().upper()
+    if len(code) == 2 and code.isalpha():
+        return chr(ord(code[0]) - ord("A") + 0x1F1E6) + chr(ord(code[1]) - ord("A") + 0x1F1E6)
+    return ""
+
+
+def normalize_org_name(org: str) -> str:
+    """Нормализует пробелы в названии организации/провайдера."""
+    raw = str(org or "").strip()
+    return " ".join(raw.split()) if raw else ""
+
+
 @dataclasses.dataclass
 class Server:
     group_id: int
@@ -97,6 +111,9 @@ class Server:
     ip_out: str = ""
     latency_ms: int = 0
     note: str = ""
+    country_code: str = ""
+    city: str = ""
+    org: str = ""
 
     @property
     def host_port(self) -> str:
@@ -109,6 +126,81 @@ class Server:
             return True
         proto = str(self.import_obj.get("type") or self.import_obj.get("protocol") or "").strip().lower()
         return proto not in ("hysteria2", "tuic", "wireguard")
+
+    @property
+    def sni(self) -> str:
+        """Извлекает SNI / serverName из конфигурации (sing-box или Xray)."""
+        if not self.import_obj or not isinstance(self.import_obj, dict):
+            return ""
+        obj = self.import_obj
+        tls = obj.get("tls")
+        if isinstance(tls, dict) and (sn := tls.get("server_name")):
+            return str(sn).strip()
+        ss = obj.get("streamSettings")
+        if isinstance(ss, dict):
+            for sk in ("tlsSettings", "realitySettings"):
+                sub = ss.get(sk)
+                if isinstance(sub, dict) and (sn := sub.get("serverName")):
+                    return str(sn).strip()
+        return ""
+
+    @property
+    def fingerprint(self) -> str:
+        """Извлекает uTLS fingerprint из конфигурации (sing-box или Xray)."""
+        if not self.import_obj or not isinstance(self.import_obj, dict):
+            return ""
+        obj = self.import_obj
+        tls = obj.get("tls")
+        if isinstance(tls, dict):
+            utls = tls.get("utls")
+            if isinstance(utls, dict) and (f := utls.get("fingerprint")):
+                return str(f).strip().lower()
+        ss = obj.get("streamSettings")
+        if isinstance(ss, dict):
+            for sk in ("tlsSettings", "realitySettings"):
+                sub = ss.get(sk)
+                if isinstance(sub, dict) and (f := sub.get("fingerprint")):
+                    return str(f).strip().lower()
+        return ""
+
+    @property
+    def formatted_tag(self) -> str:
+        """Формирует информативное имя узла для экспорта/отображения.
+
+        Формат:
+        {flag} {code}, {city} | {clean_org} (sni: {sni}, fp: {fp})
+        Если egress-гео недоступно, используется fallback на исходное name.
+        """
+        flag = country_code_to_emoji(self.country_code)
+        loc_parts: list[str] = []
+        if self.country_code:
+            loc_parts.append(self.country_code.upper())
+        if self.city:
+            loc_parts.append(self.city)
+        loc_str = ", ".join(loc_parts)
+
+        main_geo = f"{flag} {loc_str}".strip() if (flag or loc_str) else ""
+        org_str = normalize_org_name(self.org)
+
+        parts: list[str] = []
+        if main_geo:
+            parts.append(main_geo)
+        if org_str:
+            parts.append(org_str)
+
+        fallback_name = self.name or (self.host_port if self.server else "proxy")
+        head = " | ".join(parts) if parts else fallback_name
+
+        extra_parts: list[str] = []
+        if self.sni:
+            extra_parts.append(f"sni: {self.sni}")
+        if self.fingerprint:
+            extra_parts.append(f"fp: {self.fingerprint}")
+
+        if extra_parts:
+            head = f"{head} ({', '.join(extra_parts)})"
+
+        return head
 
     @property
     def config_identity(self) -> str:
@@ -153,18 +245,13 @@ class Server:
         raw_flow = str(obj.get("flow") or s.get("flow") or user_obj.get("flow") or "").strip()
         flow = "xtls-rprx-vision" if "vision" in raw_flow.lower() else raw_flow
 
-        sni = ""
-        fp = ""
+        sni = self.sni
+        fp = self.fingerprint
         reality_pk = ""
         alpn_str = ""
 
         tls = obj.get("tls")
         if isinstance(tls, dict):
-            if sn := tls.get("server_name"):
-                sni = str(sn).strip()
-            utls = tls.get("utls")
-            if isinstance(utls, dict) and (f := utls.get("fingerprint")):
-                fp = str(f).strip().lower()
             reality = tls.get("reality")
             if isinstance(reality, dict) and (pk := reality.get("public_key")):
                 reality_pk = str(pk).strip()
@@ -180,10 +267,6 @@ class Server:
             for sk in ("tlsSettings", "realitySettings"):
                 sub = ss.get(sk)
                 if isinstance(sub, dict):
-                    if not sni and (sn := sub.get("serverName")):
-                        sni = str(sn).strip()
-                    if not fp and (f := sub.get("fingerprint")):
-                        fp = str(f).strip().lower()
                     if not reality_pk and (pk := (sub.get("publicKey") or sub.get("password"))):
                         reality_pk = str(pk).strip()
                     if not alpn_str and "alpn" in sub:

@@ -84,17 +84,20 @@ class ResultCache:
         if server.result not in self.ttl_map:
             return
         now_s = (now or utcnow()).isoformat(timespec="seconds")
+        cur = self.entries.get(server.cache_key) or self.entries.get(server.host_port) or {}
         rec: dict = {
             "checked": now_s,
             "result": server.result,
-            "country": server.country,
-            "ip_out": server.ip_out,
+            "country": server.country or cur.get("country", ""),
+            "ip_out": server.ip_out or cur.get("ip_out", ""),
+            "country_code": server.country_code or cur.get("country_code", ""),
+            "city": server.city or cur.get("city", ""),
+            "org": server.org or cur.get("org", ""),
             "latency_ms": server.latency_ms,
             "note": server.note,
         }
         if server.result == RESULT_OK:
             rec["engine"] = server.engine
-            cur = self.entries.get(server.cache_key) or self.entries.get(server.host_port) or {}
             rec["import_obj"] = server.import_obj or cur.get("import_obj")
         self.put(server.cache_key, rec, force=True)
 
@@ -102,11 +105,17 @@ class ResultCache:
         rec = self.entries.get(server.cache_key) or self.entries.get(server.host_port)
         if not rec or rec.get("result") != RESULT_OK:
             return False
+        changed = False
         if server.import_obj and not rec.get("import_obj"):
             rec["engine"] = server.engine
             rec["import_obj"] = server.import_obj
-            return True
-        return False
+            changed = True
+        if server.country_code and not rec.get("country_code"):
+            rec["country_code"] = server.country_code
+            rec["city"] = server.city
+            rec["org"] = server.org
+            changed = True
+        return changed
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -105,10 +105,9 @@ def gather_sources(
 ) -> tuple[list[Server], list[str]]:
     warnings: list[str] = []
     all_items: list[Server] = []
-    group_map = {g["id"]: g for g in groups}
-    for gid in sorted(selected):
-        g = group_map.get(gid)
-        if not g:
+    for g in groups:
+        gid = g.get("id")
+        if gid not in selected:
             continue
         gname = g.get("name", f"Group {gid}")
         remove_insecure = bool(g.get("remove_insecure", False))

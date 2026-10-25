@@ -127,9 +127,20 @@ def read_groups() -> list[dict]:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute(
-            "SELECT id, name, url, sub_options_json FROM groups WHERE archive=0 ORDER BY id"
-        ).fetchall()
+        try:
+            rows = con.execute(
+                """
+                SELECT g.id, g.name, g.url, g.sub_options_json
+                FROM groups g
+                LEFT JOIN groups_order go ON g.id = go.group_id
+                WHERE g.archive = 0
+                ORDER BY COALESCE(go.display_order, 999999) ASC, g.id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = con.execute(
+                "SELECT id, name, url, sub_options_json FROM groups WHERE archive=0 ORDER BY id"
+            ).fetchall()
         result: list[dict] = []
         for r in rows:
             d = dict(r)
@@ -154,9 +165,26 @@ def read_profiles_for_group(gid: int, group_name: str = "") -> list[Server]:
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        rows = con.execute("SELECT type, name, outbound_json FROM profiles WHERE gid=? ORDER BY id", (gid,)).fetchall()
+        profiles_order: list[int] = []
+        try:
+            grow = con.execute("SELECT profiles_json FROM groups WHERE id=?", (gid,)).fetchone()
+            if grow and grow["profiles_json"]:
+                raw_pj = json.loads(grow["profiles_json"])
+                if isinstance(raw_pj, list):
+                    profiles_order = [int(x) for x in raw_pj if isinstance(x, (int, str)) and str(x).isdigit()]
+        except Exception:
+            profiles_order = []
+
+        rows = con.execute("SELECT id, type, name, outbound_json FROM profiles WHERE gid=?", (gid,)).fetchall()
     finally:
         con.close()
+
+    if profiles_order:
+        order_map = {pid: idx for idx, pid in enumerate(profiles_order)}
+        rows = sorted(rows, key=lambda r: (order_map.get(r["id"], 999999), r["id"]))
+    else:
+        rows = sorted(rows, key=lambda r: r["id"])
+
     out: list[Server] = []
     for r in rows:
         try:

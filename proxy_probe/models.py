@@ -165,11 +165,13 @@ class Server:
 
     @property
     def formatted_tag(self) -> str:
-        """Формирует информативное имя узла для экспорта/отображения.
+        """Формирует полностью собственное каноническое имя узла (SSOT).
 
+        Никогда не парсит и не использует сырые имена из подписок.
         Формат:
         {flag} {code}, {city} | {clean_org} (sni: {sni}, fp: {fp})
-        Если egress-гео недоступно, используется fallback на исходное name.
+        Фоллбэк при неполном гео:
+        {flag} {code} | {clean_org} -> {country} -> {host}:{port}
         """
         flag = country_code_to_emoji(self.country_code)
         loc_parts: list[str] = []
@@ -185,11 +187,13 @@ class Server:
         parts: list[str] = []
         if main_geo:
             parts.append(main_geo)
+        elif self.country:
+            parts.append(self.country)
+
         if org_str:
             parts.append(org_str)
 
-        fallback_name = self.name or (self.host_port if self.server else "proxy")
-        head = " | ".join(parts) if parts else fallback_name
+        head = " | ".join(parts) if parts else (self.host_port if self.server else "proxy")
 
         extra_parts: list[str] = []
         if self.sni:

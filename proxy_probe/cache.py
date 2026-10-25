@@ -117,6 +117,35 @@ class ResultCache:
             changed = True
         return changed
 
+    def enrich_geo_from_ips(self, ip_map: dict[str, tuple[str, str, str, str, str]]) -> int:
+        """Обогащает записи кэша AGY-OK гео-метаданными из словаря {ip: (country, ip_out, code, city, org)}."""
+        changed_count = 0
+        for rec in self.entries.values():
+            if rec.get("result") != RESULT_OK:
+                continue
+            ip = str(rec.get("ip_out") or "").strip()
+            if not ip or ip not in ip_map:
+                continue
+            country, _, code, city, org = ip_map[ip]
+            if not code and not country:
+                continue
+            rec_changed = False
+            if not rec.get("country_code") and code:
+                rec["country_code"] = code
+                rec_changed = True
+            if not rec.get("city") and city:
+                rec["city"] = city
+                rec_changed = True
+            if not rec.get("org") and org:
+                rec["org"] = org
+                rec_changed = True
+            if not rec.get("country") and country:
+                rec["country"] = country
+                rec_changed = True
+            if rec_changed:
+                changed_count += 1
+        return changed_count
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")

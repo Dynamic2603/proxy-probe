@@ -135,3 +135,64 @@ def test_run_probe_with_stop_event(tmp_path: prober.Path) -> None:
     assert res["result"] == RESULT_DEAD
     assert res["latency_ms"] == 0
     assert "проверка отменена" in res["note"]
+
+
+def test_probe_tcp_port_success() -> None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+
+        is_alive, lat, note = prober.probe_tcp_port("127.0.0.1", port, timeout=1.0)
+        assert is_alive is True
+        assert lat >= 0
+        assert note == ""
+
+
+def test_probe_tcp_port_refused() -> None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    is_alive, lat, note = prober.probe_tcp_port("127.0.0.1", port, timeout=0.5)
+    assert is_alive is False
+    assert lat == 0
+    assert "tcp:" in note
+
+
+def test_probe_tcp_port_dns_error() -> None:
+    is_alive, _lat, note = prober.probe_tcp_port("invalid-domain-never-exists-1234567.invalid", 443, timeout=0.5)
+    assert is_alive is False
+    assert "tcp:" in note
+
+
+def test_batch_probe_tcp() -> None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        alive_port = s.getsockname()[1]
+
+        endpoints = {("127.0.0.1", alive_port)}
+        res = prober.batch_probe_tcp(endpoints, timeout=1.0)
+        assert ("127.0.0.1", alive_port) in res
+        assert res[("127.0.0.1", alive_port)][0] is True
+
+
+def test_server_is_tcp_protocol() -> None:
+    from proxy_probe.models import Server
+
+    s_vless = Server(1, "g", "s", "sing-box", "1.1.1.1", 443, {"type": "vless"}, "fresh")
+    s_hy2 = Server(1, "g", "s", "sing-box", "1.1.1.1", 443, {"type": "hysteria2"}, "fresh")
+    s_wg = Server(1, "g", "s", "sing-box", "1.1.1.1", 443, {"protocol": "wireguard"}, "fresh")
+    s_none = Server(1, "g", "s", "sing-box", "1.1.1.1", 443, {}, "fresh")
+
+    assert s_vless.is_tcp_protocol is True
+    assert s_hy2.is_tcp_protocol is False
+    assert s_wg.is_tcp_protocol is False
+    assert s_none.is_tcp_protocol is True

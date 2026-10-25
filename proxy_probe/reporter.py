@@ -24,6 +24,7 @@ def write_report(
     time_s: float,
     cached_counts: dict[str, int] | None = None,
     cache_note: str = "",
+    cached_unique_hosts: dict[str, set[str]] | None = None,
 ) -> None:
     counts = Counter(s.result for s in servers if s.result)
     tested_count = sum(1 for s in servers if s.result)
@@ -38,9 +39,17 @@ def write_report(
     if fresh_cnt or db_cnt:
         lines.append(f"- Состав пула: {len(servers)} серверов (онлайн: {fresh_cnt}, из БД Throne: {db_cnt})")
     if cached_counts:
-        hit_txt = ", ".join(f"{k} = {v}" for k, v in cached_counts.items() if v)
-        if hit_txt:
-            lines.append(f"- Пропущено по кэшу (не проверялись): {hit_txt}")
+        hit_parts = []
+        for k, v in cached_counts.items():
+            if not v:
+                continue
+            u_cnt = len(cached_unique_hosts.get(k, set())) if cached_unique_hosts else 0
+            if u_cnt > 0 and u_cnt < v:
+                hit_parts.append(f"{k} = {v} ({u_cnt} уникальных узлов)")
+            else:
+                hit_parts.append(f"{k} = {v}")
+        if hit_parts:
+            lines.append(f"- Пропущено по кэшу (не проверялись): {', '.join(hit_parts)}")
     lines.append(f"- Движки: sing-box v{ver_sb}, Xray v{ver_xr} (точные версии Throne)")
     lines.append(f"- Время проверки: {time_s:.0f} с")
     if counts:

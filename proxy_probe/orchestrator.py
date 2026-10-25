@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import shutil
 import sys
 import tempfile
@@ -51,7 +50,11 @@ def fetch_subscription(url: str, timeout: float = 25.0) -> bytes | None:
 
 def _canonical_structure(val: Any) -> Any:
     if isinstance(val, dict):
-        return {k: _canonical_structure(v) for k, v in sorted(val.items()) if k not in ("tag", "remarks")}
+        return {
+            k: _canonical_structure(v)
+            for k, v in sorted(val.items())
+            if k not in ("tag", "remarks", "packet_encoding")
+        }
     if isinstance(val, list):
         items = [_canonical_structure(x) for x in val]
         if all(isinstance(x, (str, int, float, bool)) for x in items):
@@ -64,10 +67,14 @@ def _canonical_structure(val: Any) -> Any:
 
 
 def dedupe_servers(items: list[Server]) -> list[Server]:
+    """Дедуплицирует серверы по их канонической конфигурации (SSOT).
+
+    Свежие записи из онлайн-подписок (source: fresh) замещают
+    устаревшие копии из локальной БД (source: db).
+    """
     seen: dict[str, Server] = {}
     for it in items:
-        clean = _canonical_structure(it.import_obj) if isinstance(it.import_obj, dict) else it.import_obj
-        key = f"{it.engine}:{json.dumps(clean, sort_keys=True, ensure_ascii=False)}"
+        key = it.config_identity
         if key in seen:
             cur = seen[key]
             if (cur.source == "db" and it.source == "fresh") or (cur.name == cur.host_port and it.name != it.host_port):

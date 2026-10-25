@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import re
 from typing import Any
 
@@ -102,32 +103,111 @@ class Server:
         return f"{self.server}:{self.server_port}"
 
     @property
-    def cache_key(self) -> str:
-        if self.import_obj and isinstance(self.import_obj, dict):
-            ident: list[str] = []
-            for k in ("uuid", "password", "method", "flow"):
-                if val := self.import_obj.get(k):
-                    ident.append(f"{k}:{val}")
-            s = self.import_obj.get("settings")
-            if isinstance(s, dict):
-                for k in ("id", "password"):
-                    if val := s.get(k):
-                        ident.append(f"{k}:{val}")
-            tls = self.import_obj.get("tls")
-            if isinstance(tls, dict) and (sn := tls.get("server_name")):
-                ident.append(f"sni:{sn}")
-            ss = self.import_obj.get("streamSettings")
-            if isinstance(ss, dict):
-                for sk in ("tlsSettings", "realitySettings"):
-                    sub = ss.get(sk)
-                    if isinstance(sub, dict) and (sn := sub.get("serverName")):
-                        ident.append(f"sni:{sn}")
-            tr = self.import_obj.get("transport")
-            if isinstance(tr, dict) and (p := tr.get("path")):
-                ident.append(f"path:{p}")
-            if ident:
-                import hashlib
+    def is_tcp_protocol(self) -> bool:
+        """Определяет, использует ли узел транспорт TCP (False для чистого UDP: Hysteria 2, WireGuard, TUIC)."""
+        if not self.import_obj or not isinstance(self.import_obj, dict):
+            return True
+        proto = str(self.import_obj.get("type") or self.import_obj.get("protocol") or "").strip().lower()
+        return proto not in ("hysteria2", "tuic", "wireguard")
 
-                h = hashlib.sha256(";".join(ident).encode("utf-8")).hexdigest()[:8]
-                return f"{self.server}:{self.server_port}:{self.engine}:{h}"
-        return f"{self.server}:{self.server_port}:{self.engine}"
+    @property
+    def config_identity(self) -> str:
+        """Канонический идентификатор конфигурации узла (SSOT).
+
+        Нормализует диалекты Xray и sing-box в единый канонический ключ:
+        protocol : host : port : cred : sni : reality_pk : fingerprint : flow : alpn : path
+        """
+        if not self.import_obj or not isinstance(self.import_obj, dict):
+            return f"unknown:{self.server}:{self.server_port}"
+
+        obj = self.import_obj
+        proto = str(obj.get("type") or obj.get("protocol") or "").strip().lower()
+
+        raw_settings = obj.get("settings")
+        s: dict[str, Any] = raw_settings if isinstance(raw_settings, dict) else {}
+        user_obj: dict[str, Any] = {}
+        vnext = s.get("vnext")
+        if isinstance(vnext, list) and vnext and isinstance(vnext[0], dict):
+            users = vnext[0].get("users")
+            if isinstance(users, list) and users and isinstance(users[0], dict):
+                user_obj = users[0]
+        elif (
+            (servers_list := s.get("servers"))
+            and isinstance(servers_list, list)
+            and servers_list
+            and isinstance(servers_list[0], dict)
+        ):
+            user_obj = servers_list[0]
+
+        uuid = obj.get("uuid") or s.get("id") or user_obj.get("id") or user_obj.get("uuid")
+
+        cred_parts: list[str] = []
+        if uuid:
+            cred_parts.append(f"uuid={uuid}")
+        if pwd := (obj.get("password") or s.get("password") or user_obj.get("password")):
+            cred_parts.append(f"pwd={pwd}")
+        if method := (obj.get("method") or s.get("method") or user_obj.get("method")):
+            cred_parts.append(f"method={method}")
+        cred = ";".join(sorted(cred_parts))
+
+        raw_flow = str(obj.get("flow") or s.get("flow") or user_obj.get("flow") or "").strip()
+        flow = "xtls-rprx-vision" if "vision" in raw_flow.lower() else raw_flow
+
+        sni = ""
+        fp = ""
+        reality_pk = ""
+        alpn_str = ""
+
+        tls = obj.get("tls")
+        if isinstance(tls, dict):
+            if sn := tls.get("server_name"):
+                sni = str(sn).strip()
+            utls = tls.get("utls")
+            if isinstance(utls, dict) and (f := utls.get("fingerprint")):
+                fp = str(f).strip().lower()
+            reality = tls.get("reality")
+            if isinstance(reality, dict) and (pk := reality.get("public_key")):
+                reality_pk = str(pk).strip()
+            if "alpn" in tls:
+                raw_alpn = tls.get("alpn")
+                if isinstance(raw_alpn, list):
+                    alpn_str = ",".join(sorted(str(x) for x in raw_alpn))
+                elif raw_alpn:
+                    alpn_str = str(raw_alpn).strip()
+
+        ss = obj.get("streamSettings")
+        if isinstance(ss, dict):
+            for sk in ("tlsSettings", "realitySettings"):
+                sub = ss.get(sk)
+                if isinstance(sub, dict):
+                    if not sni and (sn := sub.get("serverName")):
+                        sni = str(sn).strip()
+                    if not fp and (f := sub.get("fingerprint")):
+                        fp = str(f).strip().lower()
+                    if not reality_pk and (pk := (sub.get("publicKey") or sub.get("password"))):
+                        reality_pk = str(pk).strip()
+                    if not alpn_str and "alpn" in sub:
+                        raw_alpn = sub.get("alpn")
+                        if isinstance(raw_alpn, list):
+                            alpn_str = ",".join(sorted(str(x) for x in raw_alpn))
+                        elif raw_alpn:
+                            alpn_str = str(raw_alpn).strip()
+
+        path = ""
+        tr = obj.get("transport")
+        if isinstance(tr, dict) and (p := tr.get("path")):
+            path = str(p).strip()
+        elif isinstance(ss, dict):
+            for t_key in ("wsSettings", "xhttpSettings", "httpSettings", "grpcSettings"):
+                sub = ss.get(t_key)
+                if isinstance(sub, dict):
+                    p = sub.get("path") or sub.get("serviceName")
+                    if p and not path:
+                        path = str(p).strip()
+
+        return f"{proto}:{self.server}:{self.server_port}:{cred}:{sni}:{reality_pk}:{fp}:{flow}:{alpn_str}:{path}"
+
+    @property
+    def cache_key(self) -> str:
+        h = hashlib.sha256(self.config_identity.encode("utf-8")).hexdigest()[:8]
+        return f"{self.server}:{self.server_port}:{self.engine}:{h}"

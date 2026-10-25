@@ -39,16 +39,27 @@ def format_latency(ms: int) -> str:
     return f"[red]{ms} мс[/red]"
 
 
-def format_cached_counters(cached_counts: dict[str, int]) -> str:
+def format_cached_counters(
+    cached_counts: dict[str, int],
+    cached_unique_hosts: dict[str, set[str]] | None = None,
+) -> str:
     order = [RESULT_OK, RESULT_BLOCK, RESULT_DEAD, RESULT_UNKNOWN]
     parts: list[str] = []
     for k in order:
         v = cached_counts.get(k, 0)
         if v > 0:
-            parts.append(f"{k}: {v}")
+            u_cnt = len(cached_unique_hosts.get(k, set())) if cached_unique_hosts else 0
+            if u_cnt > 0 and u_cnt < v:
+                parts.append(f"{k}: {v} ({u_cnt} уникальных)")
+            else:
+                parts.append(f"{k}: {v}")
     for k, v in cached_counts.items():
         if k not in order and v > 0:
-            parts.append(f"{k}: {v}")
+            u_cnt = len(cached_unique_hosts.get(k, set())) if cached_unique_hosts else 0
+            if u_cnt > 0 and u_cnt < v:
+                parts.append(f"{k}: {v} ({u_cnt} уникальных)")
+            else:
+                parts.append(f"{k}: {v}")
     return f"Из кэша: {', '.join(parts)}" if parts else ""
 
 
@@ -138,6 +149,7 @@ def print_summary_panel(
     nb: int,
     nx: int,
     elapsed_s: float,
+    cached_unique_hosts: dict[str, set[str]] | None = None,
 ) -> None:
     counts = Counter(s.result for s in servers if s.result)
     tested_count = sum(1 for s in servers if s.result)
@@ -162,8 +174,16 @@ def print_summary_panel(
 
     cached_total = sum(cached_counts.values())
     if cached_total > 0:
-        c_txt = ", ".join(f"{k}: {v}" for k, v in cached_counts.items() if v)
-        lines.append(f"[dim]Из кэша (без повторной проверки): {c_txt}[/dim]")
+        c_parts = []
+        for k, v in cached_counts.items():
+            if not v:
+                continue
+            u_cnt = len(cached_unique_hosts.get(k, set())) if cached_unique_hosts else 0
+            if u_cnt > 0 and u_cnt < v:
+                c_parts.append(f"{k}: {v} ({u_cnt} уникальных)")
+            else:
+                c_parts.append(f"{k}: {v}")
+        lines.append(f"[dim]Из кэша (без повторной проверки): {', '.join(c_parts)}[/dim]")
 
     lines.append("")
     lines.append(f"[bold cyan]Отчёт:[/] {report_path}")

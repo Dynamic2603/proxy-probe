@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -283,6 +286,75 @@ def agy_probe(
 
 
 PREFLIGHT_URL = "https://www.google.com/generate_204"
+
+
+def probe_tcp_port(host: str, port: int, timeout: float = 1.5) -> tuple[bool, int, str]:
+    """Проверяет доступность удалённого хоста по L4 TCP (3-way handshake).
+
+    Возвращает:
+        (is_alive, latency_ms, error_note)
+    """
+    t0 = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            latency_ms = max(1, int((time.perf_counter() - t0) * 1000))
+            return True, latency_ms, ""
+    except TimeoutError:
+        return False, 0, "tcp: таймаут соединения (хост не отвечает)"
+    except ConnectionRefusedError:
+        return False, 0, "tcp: соединение сброшено (порт закрыт)"
+    except socket.gaierror:
+        return False, 0, "tcp: ошибка разрешения доменного имени (DNS)"
+    except OSError as e:
+        err_msg = str(e.strerror or e).strip()
+        return False, 0, f"tcp: ошибка сокета ({err_msg})"
+
+
+def batch_probe_tcp(
+    endpoints: set[tuple[str, int]],
+    timeout: float = 1.5,
+    max_workers: int = 100,
+    stop_event: threading.Event | None = None,
+    progress_callback: Callable[[int, int], Any] | None = None,
+) -> dict[tuple[str, int], tuple[bool, int, str]]:
+    """Параллельно проверяет доступность множества уникальных TCP-эндпоинтов (host, port).
+
+    Возвращает:
+        dict[(host, port) -> (is_alive, latency_ms, error_note)]
+    """
+    results: dict[tuple[str, int], tuple[bool, int, str]] = {}
+    if not endpoints:
+        return results
+
+    total = len(endpoints)
+    completed = 0
+    workers = min(max_workers, max(1, total))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_ep = {
+            executor.submit(probe_tcp_port, host, port, timeout): (host, port)
+            for host, port in endpoints
+        }
+        for future in concurrent.futures.as_completed(future_to_ep):
+            if stop_event is not None and stop_event.is_set():
+                for f in future_to_ep:
+                    f.cancel()
+                break
+            ep = future_to_ep[future]
+            try:
+                results[ep] = future.result()
+            except Exception as e:
+                results[ep] = (False, 0, f"tcp: внутренняя ошибка ({e})")
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
+
+    if stop_event is not None and stop_event.is_set():
+        for ep in endpoints:
+            if ep not in results:
+                results[ep] = (False, 0, "проверка отменена")
+
+    return results
 
 
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str]:

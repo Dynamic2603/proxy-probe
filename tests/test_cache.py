@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from pathlib import Path
 
 from proxy_probe.cache import ResultCache
@@ -225,3 +226,170 @@ def test_cache_key_cross_dialect_equivalence() -> None:
         source=s_xray.source,
     )
     assert s_xray_as_singbox.cache_key == s_singbox.cache_key
+
+
+def test_calculate_score() -> None:
+    from proxy_probe.cache import calculate_score
+
+    # Базовый скор для первого успеха с хорошим пингом
+    assert calculate_score(ok_count=1, consecutive_fails=0, latency_ms=100) == 70
+
+    # Накопление истории (бонус +3 за каждый успех)
+    assert calculate_score(ok_count=4, consecutive_fails=0, latency_ms=100) == 79
+
+    # Максимальный бонус истории (+20 при 8+ успехах)
+    assert calculate_score(ok_count=10, consecutive_fails=0, latency_ms=80) == 90
+
+    # Штраф за задержку (150мс база, 350мс -> -10 очков)
+    assert calculate_score(ok_count=1, consecutive_fails=0, latency_ms=350) == 60
+
+    # Штраф за сбои (-30 за каждый сбой подряд)
+    assert calculate_score(ok_count=5, consecutive_fails=1, latency_ms=100) == 52  # 70 + 12 - 30 = 52
+    assert calculate_score(ok_count=5, consecutive_fails=2, latency_ms=100) == 22  # 70 + 12 - 60 = 22
+
+    # При исчерпании лимита (3 сбоя) скор обнуляется
+    assert calculate_score(ok_count=5, consecutive_fails=3, latency_ms=100) == 0
+
+    # Без единого успеха скор 0
+    assert calculate_score(ok_count=0, consecutive_fails=0, latency_ms=100) == 0
+
+
+def test_resolve_lifecycle() -> None:
+    from proxy_probe.cache import resolve_lifecycle
+    from proxy_probe.models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, STATE_ACTIVE, STATE_DEAD, STATE_DEGRADED
+
+    # Первый успех
+    st, fails, oks = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_OK)
+    assert st == STATE_ACTIVE and fails == 0 and oks == 1
+
+    # Первый сбой для ранее работавшего узла -> переходит в DEGRADED (1/3)
+    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=0, probe_result=RESULT_DEAD)
+    assert st == STATE_DEGRADED and fails == 1 and oks == 1
+
+    # Второй сбой подряд -> остается в DEGRADED (2/3)
+    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=1, probe_result=RESULT_BLOCK)
+    assert st == STATE_DEGRADED and fails == 2 and oks == 1
+
+    # Третий сбой подряд -> исчерпание лимита, переходит в DEAD (3/3)
+    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_DEAD)
+    assert st == STATE_DEAD and fails == 3 and oks == 1
+
+    # Реабилитация из DEGRADED при успехе -> сброс сбоев в 0, возврат в ACTIVE
+    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_OK)
+    assert st == STATE_ACTIVE and fails == 0 and oks == 2
+
+    # Узел, который никогда не работал (ok_count=0), при первом же сбое сразу DEAD
+    st, fails, oks = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_DEAD)
+    assert st == STATE_DEAD and fails == 1 and oks == 0
+
+
+def test_cache_grace_period_and_scoring_lifecycle(tmp_path: Path) -> None:
+    from proxy_probe.cache import ResultCache
+    from proxy_probe.models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE, STATE_DEAD, STATE_DEGRADED
+
+    cache_file = tmp_path / "test_lifecycle.json"
+    cache = ResultCache(path=cache_file, ttl_map={RESULT_OK: 3600, RESULT_DEAD: 1800})
+
+    s = Server(
+        group_id=1,
+        group_name="grp",
+        name="server1",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={"type": "vless", "server": "1.2.3.4", "server_port": 443},
+        source="fresh",
+    )
+
+    # 1. Первый запуск: AGY-OK -> Score 70, State ACTIVE
+    s.result = RESULT_OK
+    s.latency_ms = 120
+    cache.update_from_server(s)
+    rec1 = cache.entries[s.cache_key]
+    assert rec1["state"] == STATE_ACTIVE
+    assert rec1["score"] == 70
+    assert rec1["consecutive_fails"] == 0
+    assert rec1["ok_count"] == 1
+    assert rec1["import_obj"] is not None
+
+    # 2. Второй запуск: временный сетевой сбой DEAD -> Grace Period (1/3), DEGRADED
+    s.result = RESULT_DEAD
+    s.latency_ms = 120
+    cache.update_from_server(s)
+    rec2 = cache.entries[s.cache_key]
+    assert rec2["state"] == STATE_DEGRADED
+    assert rec2["consecutive_fails"] == 1
+    assert rec2["score"] == 40  # 70 - 30 = 40
+    # import_obj сохранен для удержания в proxy-ok.txt!
+    assert rec2["import_obj"] is not None
+
+    # 3. Третий запуск: повторный сбой DEAD -> Grace Period (2/3), DEGRADED
+    s.result = RESULT_DEAD
+    cache.update_from_server(s)
+    rec3 = cache.entries[s.cache_key]
+    assert rec3["state"] == STATE_DEGRADED
+    assert rec3["consecutive_fails"] == 2
+    assert rec3["score"] == 10  # 70 - 60 = 10
+    assert rec3["import_obj"] is not None
+
+    # 4. Четвертый запуск: реабилитация AGY-OK -> сброс сбоев, возврат в ACTIVE
+    s.result = RESULT_OK
+    s.latency_ms = 90
+    cache.update_from_server(s)
+    rec4 = cache.entries[s.cache_key]
+    assert rec4["state"] == STATE_ACTIVE
+    assert rec4["consecutive_fails"] == 0
+    assert rec4["ok_count"] == 2
+    assert rec4["score"] == 73  # 70 + 3 = 73
+
+    # 5. Три сбоя подряд -> окончательный перевод в DEAD
+    s.result = RESULT_DEAD
+    cache.update_from_server(s)  # fail 1
+    assert cache.entries[s.cache_key]["state"] == STATE_DEGRADED
+
+    cache.update_from_server(s)  # fail 2
+    assert cache.entries[s.cache_key]["state"] == STATE_DEGRADED
+
+    cache.update_from_server(s)  # fail 3 -> исчерпание лимита
+    rec_dead = cache.entries[s.cache_key]
+    assert rec_dead["state"] == STATE_DEAD
+    assert rec_dead["score"] == 0
+    assert rec_dead["consecutive_fails"] == 3
+
+
+def test_cache_lazy_normalization_backward_compatibility(tmp_path: Path) -> None:
+    from proxy_probe.cache import ResultCache
+    from proxy_probe.models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE, STATE_DEAD
+
+    # Симуляция старого results.json без полей score и state
+    old_data = {
+        "version": 1,
+        "servers": {
+            "1.1.1.1:443": {
+                "checked": "2026-10-20T12:00:00",
+                "result": RESULT_OK,
+                "country": "Germany",
+                "latency_ms": 100,
+            },
+            "2.2.2.2:443": {
+                "checked": "2026-10-20T12:00:00",
+                "result": RESULT_DEAD,
+                "latency_ms": 500,
+            },
+        },
+    }
+    cache_file = tmp_path / "old_results.json"
+    cache_file.write_text(json.dumps(old_data), encoding="utf-8")
+
+    cache = ResultCache(path=cache_file)
+    rec_ok = cache.entries["1.1.1.1:443"]
+    assert rec_ok["state"] == STATE_ACTIVE
+    assert rec_ok["score"] == 70
+    assert rec_ok["consecutive_fails"] == 0
+    assert rec_ok["ok_count"] == 1
+    assert rec_ok["first_seen"] == "2026-10-20T12:00:00"
+
+    rec_dead = cache.entries["2.2.2.2:443"]
+    assert rec_dead["state"] == STATE_DEAD
+    assert rec_dead["score"] == 0
+

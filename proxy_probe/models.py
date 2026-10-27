@@ -10,6 +10,11 @@ RESULT_BLOCK = "AGY-BLOCK"
 RESULT_DEAD = "DEAD"
 RESULT_UNKNOWN = "UNKNOWN"
 
+STATE_ACTIVE = "ACTIVE"
+STATE_DEGRADED = "DEGRADED"
+STATE_DEAD = "DEAD"
+MAX_CONSECUTIVE_FAILS = 3
+
 DEFAULT_TTLS = {RESULT_OK: 3 * 86400, RESULT_BLOCK: 7 * 86400, RESULT_DEAD: 86400}
 RESULT_PRIORITIES = {RESULT_BLOCK: 3, RESULT_OK: 2, RESULT_DEAD: 1, RESULT_UNKNOWN: 0}
 
@@ -114,6 +119,9 @@ class Server:
     country_code: str = ""
     city: str = ""
     org: str = ""
+    score: int = 0
+    state: str = STATE_ACTIVE
+    consecutive_fails: int = 0
 
     @property
     def host_port(self) -> str:
@@ -203,6 +211,15 @@ class Server:
 
         if extra_parts:
             head = f"{head} ({', '.join(extra_parts)})"
+
+        badge = ""
+        if self.state == STATE_ACTIVE:
+            badge = f"[⭐{self.score}]" if self.score >= 90 else (f"[{self.score}]" if self.score > 0 else "")
+        elif self.state == STATE_DEGRADED:
+            badge = f"[⚠️{self.score}]"
+
+        if badge:
+            head = f"{badge} {head}"
 
         return head
 

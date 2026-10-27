@@ -350,6 +350,9 @@ def _collect_and_select_servers(
             s.org = rec.get("org", "")
             s.latency_ms = rec.get("latency_ms", 0)
             s.note = rec.get("note", "")
+            s.score = int(rec.get("score", 70 if res == "AGY-OK" else 0))
+            s.state = str(rec.get("state", "ACTIVE" if res == "AGY-OK" else "DEAD"))
+            s.consecutive_fails = int(rec.get("consecutive_fails", 0))
             cached_counts[res] = cached_counts.get(res, 0) + 1
             cached_unique_hosts.setdefault(res, set()).add(s.host_port)
         else:

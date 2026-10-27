@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import RESULT_OK, Server
+from .models import RESULT_OK, STATE_ACTIVE, STATE_DEGRADED, Server
 
 if TYPE_CHECKING:
     from .cache import ResultCache
@@ -66,14 +66,24 @@ def write_report(
     if cache_note:
         lines.append(f"- {cache_note}\n")
     lines.append("\n## Результаты\n")
-    lines.append("| № | Результат | Группа | Движок | Сервер | Страна | Egress IP | мс | Имя | Ответ / Примечание |")
-    lines.append("|---|-----------|--------|--------|--------|--------|-----------|-----|-----|-------------------|")
+    lines.append(
+        "| № | Результат | Статус | Скор | Группа | Движок | Сервер | Страна | Egress IP | мс | Имя |"
+        " Ответ / Примечание |"
+    )
+    lines.append(
+        "|---|-----------|--------|------|--------|--------|--------|--------|-----------|-----|-----|"
+        "-------------------|"
+    )
     for s in servers:
         name = (s.formatted_tag or s.name or "").replace("|", "\\|")[:80]
         note = (s.note or "").replace("|", "\\|").replace("\n", " ").strip()
+        state_str = s.state or "—"
+        if s.state == STATE_DEGRADED:
+            state_str = f"DEGRADED ({s.consecutive_fails}/3)"
+        score_str = f"⭐{s.score}" if s.score >= 90 else (str(s.score) if s.score > 0 else "—")
         lines.append(
-            f"| {s.index} | {s.result or '—'} | {s.group_name} | {s.engine} | {s.server}:{s.server_port} | "
-            f"{s.country} | {s.ip_out} | {s.latency_ms} | {name} | {note} |"
+            f"| {s.index} | {s.result or '—'} | {state_str} | {score_str} | {s.group_name} | {s.engine} | "
+            f"{s.server}:{s.server_port} | {s.country} | {s.ip_out} | {s.latency_ms} | {name} | {note} |"
         )
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -98,7 +108,8 @@ def write_import_file(
     # 1. Серверы активного пула в UI-порядке (s.index)
     if fallback_servers:
         for s in fallback_servers:
-            if s.result == RESULT_OK and s.import_obj:
+            is_ok = (s.result == RESULT_OK or s.state == STATE_DEGRADED)
+            if is_ok and s.import_obj:
                 ok_servers.append(s)
                 seen_keys.add(s.config_identity)
                 seen_keys.add(s.cache_key)
@@ -107,7 +118,9 @@ def write_import_file(
     # 2. Дополнительные валидные серверы из кэша, если они не были в активном пуле
     if cache is not None:
         for entry_key, entry in cache.entries.items():
-            if entry.get("result") != RESULT_OK:
+            state = entry.get("state")
+            res = entry.get("result")
+            if res != RESULT_OK and state != STATE_DEGRADED:
                 continue
             if not cache.is_valid(entry_key):
                 continue
@@ -141,6 +154,9 @@ def write_import_file(
                 country_code=str(entry.get("country_code", "")),
                 city=str(entry.get("city", "")),
                 org=str(entry.get("org", "")),
+                score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
+                state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
+                consecutive_fails=int(entry.get("consecutive_fails", 0)),
             )
             if s.config_identity in seen_keys or s.cache_key in seen_keys or s.host_port in seen_keys:
                 continue
@@ -148,6 +164,14 @@ def write_import_file(
             seen_keys.add(s.cache_key)
             seen_keys.add(s.host_port)
             ok_servers.append(s)
+
+    ok_servers.sort(
+        key=lambda s: (
+            0 if s.state == STATE_ACTIVE else 1,
+            -s.score,
+            s.latency_ms if s.latency_ms > 0 else 99999,
+        )
+    )
 
     for s in ok_servers:
         prepared = _prepare_obj(s)

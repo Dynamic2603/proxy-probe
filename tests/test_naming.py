@@ -386,3 +386,42 @@ def test_enrich_cached_ok_geo(tmp_path: Path) -> None:
     assert rec.get("country_code") == "DE"
     assert rec.get("city") == "Frankfurt am Main"
     assert rec.get("org") == "SOULFUL HOSTING LTD"
+
+
+def test_formatted_tag_with_score_badges() -> None:
+    from proxy_probe.models import STATE_ACTIVE, STATE_DEGRADED, Server
+
+    obj = {"type": "vless", "server": "1.2.3.4", "server_port": 443}
+    s = Server(
+        group_id=1,
+        group_name="grp",
+        name="test",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj=obj,
+        source="fresh",
+        country_code="DE",
+        city="Frankfurt",
+        org="Hetzner",
+    )
+
+    # Без скора (score=0) бейдж не добавляется (обратная совместимость)
+    s.score = 0
+    s.state = STATE_ACTIVE
+    assert s.formatted_tag == "🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Обычный активный узел (score < 90) -> [70]
+    s.score = 70
+    s.state = STATE_ACTIVE
+    assert s.formatted_tag == "[70] 🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Топовый стабильный узел (score >= 90) -> [⭐95]
+    s.score = 95
+    s.state = STATE_ACTIVE
+    assert s.formatted_tag == "[⭐95] 🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Узел на испытательном сроке -> [⚠️40]
+    s.score = 40
+    s.state = STATE_DEGRADED
+    assert s.formatted_tag == "[⚠️40] 🇩🇪 DE, Frankfurt | Hetzner"

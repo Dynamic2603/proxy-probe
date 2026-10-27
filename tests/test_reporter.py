@@ -196,3 +196,78 @@ def test_write_import_file_fallback(tmp_path: Path) -> None:
     data = json.loads(content)
     assert len(data) == 1
     assert data[0]["type"] == "shadowsocks"
+
+
+def test_write_import_file_scoring_and_degraded_retention(tmp_path: Path) -> None:
+    from proxy_probe.models import STATE_ACTIVE, STATE_DEAD, STATE_DEGRADED
+
+    import_file = tmp_path / "test-ranked-ok.txt"
+    s_top = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s_top",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"type": "vless", "server": "1.1.1.1", "server_port": 443},
+        source="fresh",
+        result=RESULT_OK,
+        score=95,
+        state=STATE_ACTIVE,
+        latency_ms=100,
+    )
+    s_mid = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s_mid",
+        engine="sing-box",
+        server="2.2.2.2",
+        server_port=443,
+        import_obj={"type": "vless", "server": "2.2.2.2", "server_port": 443},
+        source="fresh",
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        latency_ms=80,
+    )
+    s_degraded = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s_degraded",
+        engine="sing-box",
+        server="3.3.3.3",
+        server_port=443,
+        import_obj={"type": "vless", "server": "3.3.3.3", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+        score=40,
+        state=STATE_DEGRADED,
+        consecutive_fails=1,
+        latency_ms=200,
+    )
+    s_dead = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s_dead",
+        engine="sing-box",
+        server="4.4.4.4",
+        server_port=443,
+        import_obj={"type": "vless", "server": "4.4.4.4", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+        score=0,
+        state=STATE_DEAD,
+        consecutive_fails=3,
+        latency_ms=0,
+    )
+
+    sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_degraded, s_mid, s_top, s_dead])
+    assert sb_cnt == 3
+    assert xr_cnt == 0
+
+    content = import_file.read_text(encoding="utf-8").strip()
+    data = json.loads(content)
+    assert len(data) == 3
+    assert data[0]["server"] == "1.1.1.1"
+    assert data[1]["server"] == "2.2.2.2"
+    assert data[2]["server"] == "3.3.3.3"

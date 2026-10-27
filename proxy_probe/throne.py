@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from .models import Server
-from .parsers import extract_host_port, extract_tag
+from .parsers import extract_host_port, extract_proxy_outbounds_from_config, extract_tag
 
 APP_NAME = "proxy-probe"
 _snapshot_path: Path | None = None
@@ -192,6 +192,45 @@ def read_profiles_for_group(gid: int, group_name: str = "") -> list[Server]:
         except Exception:
             continue
         engine = "xray" if r["type"] == "xrayvless" else "sing-box"
+        if obj.get("type") == "custom" and isinstance(obj.get("config"), str):
+            try:
+                inner_cfg = json.loads(obj["config"])
+            except Exception:
+                continue
+            proxy_obs = extract_proxy_outbounds_from_config(inner_cfg)
+            if not proxy_obs:
+                continue
+            if len(proxy_obs) > 1 and (
+                inner_cfg.get("routing", {}).get("balancers")
+                or inner_cfg.get("burstObservatory")
+            ):
+                continue
+            engine = "xray"
+            for po in proxy_obs:
+                srv, prt = extract_host_port(po)
+                if not srv:
+                    continue
+                name = (
+                    r["name"]
+                    or inner_cfg.get("remarks")
+                    or obj.get("name")
+                    or extract_tag(po)
+                    or f"{srv}:{prt}"
+                )
+                out.append(
+                    Server(
+                        group_id=gid,
+                        group_name=group_name,
+                        name=name,
+                        engine=engine,
+                        server=srv,
+                        server_port=prt,
+                        import_obj=po,
+                        source="db",
+                    )
+                )
+            continue
+
         srv, prt = extract_host_port(obj)
         if not srv:
             continue

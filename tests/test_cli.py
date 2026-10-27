@@ -194,6 +194,19 @@ def test_cli_parser_tcp_flags() -> None:
     assert args.tcp_concurrency == 50
 
 
+def test_cli_parser_table_flags() -> None:
+    parser = build_arg_parser()
+    # Default values
+    default_args = parser.parse_args([])
+    assert default_args.table == "ok"
+    assert default_args.table_limit == 20
+
+    # Custom values
+    args = parser.parse_args(["--table", "none", "--table-limit", "100"])
+    assert args.table == "none"
+    assert args.table_limit == 100
+
+
 def test_execute_probe_pool_engine_counters_isolated_from_cache() -> None:
     server = Server(
         group_id=1,

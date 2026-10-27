@@ -51,6 +51,12 @@ from .security import (
     is_insecure_server,
     is_private_host,
 )
+from .stats import (
+    GeoStat,
+    GroupStat,
+    SummaryStats,
+    compute_summary_stats,
+)
 from .throne import (
     default_throne_dir,
     detect_throne_versions,
@@ -79,14 +85,18 @@ __all__ = [
     "RESULT_OK",
     "RESULT_UNKNOWN",
     "STREAM_CIPHERS",
+    "GeoStat",
+    "GroupStat",
     "ResultCache",
     "SecurityInfo",
     "SecurityLevel",
     "Server",
+    "SummaryStats",
     "alloc_port",
     "build_singbox_config",
     "build_xray_config",
     "classify_agy",
+    "compute_summary_stats",
     "console",
     "decode_body",
     "dedupe_servers",

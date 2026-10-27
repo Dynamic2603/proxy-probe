@@ -42,6 +42,7 @@ from .prober import (
     run_probe,
 )
 from .reporter import write_import_file, write_report
+from .stats import compute_summary_stats
 from .throne import (
     default_throne_dir,
     detect_throne_versions,
@@ -171,6 +172,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="отключить предварительную фильтрацию хостов по представителям эндпоинтов",
     )
+    ap.add_argument(
+        "--table",
+        choices=["ok", "all", "none"],
+        default="ok",
+        help="какие серверы выводить в итоговую таблицу консоли (ok - только рабочие, all - все, none - скрыть)",
+    )
+    ap.add_argument(
+        "--table-limit",
+        type=int,
+        default=20,
+        help="максимальное число строк в итоговой таблице консоли (0 = без ограничений, по умолчанию 20)",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -206,6 +219,8 @@ class RuntimeContext:
     tcp_concurrency: int = 100
     preflight_timeout: float = 2.5
     use_rep_filter: bool = True
+    table_mode: str = "ok"
+    table_limit: int = 20
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -283,6 +298,8 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         tcp_concurrency=int(getattr(args, "tcp_concurrency", 100)),
         preflight_timeout=float(getattr(args, "preflight_timeout", 2.5)),
         use_rep_filter=not getattr(args, "no_rep_filter", False),
+        table_mode=str(getattr(args, "table", "ok")),
+        table_limit=int(getattr(args, "table_limit", 20)),
     )
 
 
@@ -631,7 +648,8 @@ def _finalize_and_report(
     )
     nb, nx = write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
 
-    print_results_table(servers)
+    stats = compute_summary_stats(servers)
+    print_results_table(servers, mode=ctx.table_mode, limit=ctx.table_limit)
     print_summary_panel(
         servers,
         cached_counts,
@@ -641,6 +659,7 @@ def _finalize_and_report(
         nx,
         dt,
         cached_unique_hosts=cached_unique_hosts,
+        stats=stats,
     )
 
 

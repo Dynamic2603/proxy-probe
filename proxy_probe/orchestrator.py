@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import shutil
 import sys
@@ -17,6 +18,7 @@ from .ui import select_groups_interactive
 __all__ = [
     "dedupe_servers",
     "fetch_subscription",
+    "fetch_subscriptions_batch",
     "filter_insecure_servers",
     "gather_sources",
     "interactive_select",
@@ -46,6 +48,28 @@ def fetch_subscription(url: str, timeout: float = 25.0) -> bytes | None:
             return r.read()
     except Exception:
         return None
+
+
+def fetch_subscriptions_batch(
+    urls: list[str],
+    max_workers: int = 8,
+    timeout: float = 25.0,
+) -> dict[str, bytes | None]:
+    """Параллельно скачивает список URL подписок через пул потоков."""
+    unique_urls = list(dict.fromkeys(u for u in urls if u))
+    if not unique_urls:
+        return {}
+    results: dict[str, bytes | None] = {}
+    workers = min(max_workers, len(unique_urls))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        fut_map = {executor.submit(fetch_subscription, u, timeout): u for u in unique_urls}
+        for fut in concurrent.futures.as_completed(fut_map):
+            url = fut_map[fut]
+            try:
+                results[url] = fut.result()
+            except Exception:
+                results[url] = None
+    return results
 
 
 def _canonical_structure(val: Any) -> Any:
@@ -102,9 +126,23 @@ def gather_sources(
     no_fetch: bool,
     prefetched: dict[str, bytes] | None = None,
     filter_insecure: bool | None = None,
+    fetch_workers: int = 8,
 ) -> tuple[list[Server], list[str]]:
     warnings: list[str] = []
     all_items: list[Server] = []
+
+    # Пакетная параллельная загрузка подписок для выбранных групп (SSOT & SRP)
+    fetched_map: dict[str, bytes | None] = dict(prefetched) if prefetched else {}
+    if not no_fetch:
+        urls_to_fetch = [
+            g["url"]
+            for g in groups
+            if g.get("id") in selected and g.get("url") and g["url"] not in fetched_map
+        ]
+        if urls_to_fetch:
+            batch_res = fetch_subscriptions_batch(urls_to_fetch, max_workers=fetch_workers)
+            fetched_map.update(batch_res)
+
     for g in groups:
         gid = g.get("id")
         if gid not in selected:
@@ -122,7 +160,7 @@ def gather_sources(
         online_items: list[Server] = []
         url = g.get("url")
         if not no_fetch and url:
-            data = prefetched[url] if (prefetched and url in prefetched) else fetch_subscription(url)
+            data = fetched_map.get(url)
             if data is None:
                 if db_items:
                     warnings.append(f"Подписка «{gname}» (id {gid}) недоступна онлайн — взято только из БД Throne")

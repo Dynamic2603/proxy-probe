@@ -122,6 +122,11 @@ class Server:
     score: int = 0
     state: str = STATE_ACTIVE
     consecutive_fails: int = 0
+    _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
+    _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)
+    _sni: str | None = dataclasses.field(default=None, repr=False, compare=False)
+    _fingerprint: str | None = dataclasses.field(default=None, repr=False, compare=False)
+    _is_tcp_protocol: bool | None = dataclasses.field(default=None, repr=False, compare=False)
 
     @property
     def host_port(self) -> str:
@@ -130,46 +135,57 @@ class Server:
     @property
     def is_tcp_protocol(self) -> bool:
         """Определяет, использует ли узел транспорт TCP (False для чистого UDP: Hysteria 2, WireGuard, TUIC)."""
+        if self._is_tcp_protocol is not None:
+            return self._is_tcp_protocol
         if not self.import_obj or not isinstance(self.import_obj, dict):
+            self._is_tcp_protocol = True
             return True
         proto = str(self.import_obj.get("type") or self.import_obj.get("protocol") or "").strip().lower()
-        return proto not in ("hysteria2", "tuic", "wireguard")
+        res = proto not in ("hysteria2", "tuic", "wireguard")
+        self._is_tcp_protocol = res
+        return res
 
     @property
     def sni(self) -> str:
         """Извлекает SNI / serverName из конфигурации (sing-box или Xray)."""
-        if not self.import_obj or not isinstance(self.import_obj, dict):
-            return ""
-        obj = self.import_obj
-        tls = obj.get("tls")
-        if isinstance(tls, dict) and (sn := tls.get("server_name")):
-            return str(sn).strip()
-        ss = obj.get("streamSettings")
-        if isinstance(ss, dict):
-            for sk in ("tlsSettings", "realitySettings"):
-                sub = ss.get(sk)
-                if isinstance(sub, dict) and (sn := sub.get("serverName")):
-                    return str(sn).strip()
-        return ""
+        if self._sni is not None:
+            return self._sni
+        res = ""
+        if self.import_obj and isinstance(self.import_obj, dict):
+            obj = self.import_obj
+            tls = obj.get("tls")
+            if isinstance(tls, dict) and (sn := tls.get("server_name")):
+                res = str(sn).strip()
+            elif isinstance(ss := obj.get("streamSettings"), dict):
+                for sk in ("tlsSettings", "realitySettings"):
+                    sub = ss.get(sk)
+                    if isinstance(sub, dict) and (sn := sub.get("serverName")):
+                        res = str(sn).strip()
+                        break
+        self._sni = res
+        return res
 
     @property
     def fingerprint(self) -> str:
         """Извлекает uTLS fingerprint из конфигурации (sing-box или Xray)."""
-        if not self.import_obj or not isinstance(self.import_obj, dict):
-            return ""
-        obj = self.import_obj
-        tls = obj.get("tls")
-        if isinstance(tls, dict):
-            utls = tls.get("utls")
-            if isinstance(utls, dict) and (f := utls.get("fingerprint")):
-                return str(f).strip().lower()
-        ss = obj.get("streamSettings")
-        if isinstance(ss, dict):
-            for sk in ("tlsSettings", "realitySettings"):
-                sub = ss.get(sk)
-                if isinstance(sub, dict) and (f := sub.get("fingerprint")):
-                    return str(f).strip().lower()
-        return ""
+        if self._fingerprint is not None:
+            return self._fingerprint
+        res = ""
+        if self.import_obj and isinstance(self.import_obj, dict):
+            obj = self.import_obj
+            tls = obj.get("tls")
+            if isinstance(tls, dict):
+                utls = tls.get("utls")
+                if isinstance(utls, dict) and (f := utls.get("fingerprint")):
+                    res = str(f).strip().lower()
+            if not res and isinstance(ss := obj.get("streamSettings"), dict):
+                for sk in ("tlsSettings", "realitySettings"):
+                    sub = ss.get(sk)
+                    if isinstance(sub, dict) and (f := sub.get("fingerprint")):
+                        res = str(f).strip().lower()
+                        break
+        self._fingerprint = res
+        return res
 
     @property
     def formatted_tag(self) -> str:
@@ -230,8 +246,13 @@ class Server:
         Нормализует диалекты Xray и sing-box в единый канонический ключ:
         protocol : host : port : cred : sni : reality_pk : fingerprint : flow : alpn : path
         """
+        if self._config_identity is not None:
+            return self._config_identity
+
         if not self.import_obj or not isinstance(self.import_obj, dict):
-            return f"unknown:{self.server}:{self.server_port}"
+            res = f"unknown:{self.server}:{self.server_port}"
+            self._config_identity = res
+            return res
 
         obj = self.import_obj
         proto = str(obj.get("type") or obj.get("protocol") or "").strip().lower()
@@ -309,9 +330,15 @@ class Server:
                     if p and not path:
                         path = str(p).strip()
 
-        return f"{proto}:{self.server}:{self.server_port}:{cred}:{sni}:{reality_pk}:{fp}:{flow}:{alpn_str}:{path}"
+        res = f"{proto}:{self.server}:{self.server_port}:{cred}:{sni}:{reality_pk}:{fp}:{flow}:{alpn_str}:{path}"
+        self._config_identity = res
+        return res
 
     @property
     def cache_key(self) -> str:
+        if self._cache_key is not None:
+            return self._cache_key
         h = hashlib.sha256(self.config_identity.encode("utf-8")).hexdigest()[:8]
-        return f"{self.server}:{self.server_port}:{self.engine}:{h}"
+        res = f"{self.server}:{self.server_port}:{self.engine}:{h}"
+        self._cache_key = res
+        return res

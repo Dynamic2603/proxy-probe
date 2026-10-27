@@ -134,12 +134,22 @@ def resolve_lightest_flash_model(model_names: list[str]) -> str | None:
 
 
 @cache
-def detect_best_agy_model(agy_bin: str) -> str | None:
-    """Определяет наилучшую легковесную модель через 'agy models'."""
+def detect_best_agy_model(agy_bin: str, cache: Any = None) -> str | None:
+    """Определяет наилучшую легковесную модель через 'agy models' с поддержкой кэша метаданных."""
     env_model = os.environ.get("AGY_MODEL")
     if env_model:
         return env_model.strip()
 
+    if cache is not None:
+        try:
+            cached_model = cache.get_meta("best_model")
+            saved_at = float(cache.get_meta("best_model_saved_at", 0))
+            if cached_model and isinstance(cached_model, str) and (time.time() - saved_at < 86400):
+                return cached_model
+        except Exception:
+            pass
+
+    matched: str | None = None
     try:
         proc = subprocess.run(
             [agy_bin, "models"],
@@ -158,11 +168,17 @@ def detect_best_agy_model(agy_bin: str) -> str | None:
                 if parts:
                     names.append(parts[0])
             matched = resolve_lightest_flash_model(names)
-            if matched:
-                return matched
     except Exception:
         pass
-    return None
+
+    if matched and cache is not None:
+        try:
+            cache.set_meta("best_model", matched)
+            cache.set_meta("best_model_saved_at", time.time())
+            cache.save()
+        except Exception:
+            pass
+    return matched
 
 
 def check_agy_health(

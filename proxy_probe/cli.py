@@ -26,12 +26,10 @@ from .engines import alloc_port, ensure_binaries
 from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
 from .orchestrator import (
     dedupe_servers,
-    fetch_subscription,
     gather_sources,
     interactive_select,
     pause_on_exit,
 )
-from .parsers import parse_subscription
 from .prober import (
     AGY_PRINT_TIMEOUT_DEFAULT,
     ProcessRegistry,
@@ -159,8 +157,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--tcp-concurrency",
         type=int,
-        default=100,
-        help="число параллельных потоков L4 TCP-фильтра (по умолчанию 100)",
+        default=200,
+        help="число параллельных потоков L4 TCP-фильтра (по умолчанию 200)",
     )
     ap.add_argument(
         "--preflight-timeout",
@@ -214,7 +212,21 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     agy_bin = _resolve_agy_bin(args.agy_bin)
     print(f"Пробер agy: {agy_bin}")
 
-    agy_model = args.agy_model or detect_best_agy_model(agy_bin)
+    cache_path = Path(args.cache) if args.cache else default_cache_path()
+    ttl_map = {"AGY-OK": args.ttl_ok, "AGY-BLOCK": args.ttl_blocked, "DEAD": args.ttl_dead}
+    cache = ResultCache(path=cache_path, ttl_map=ttl_map) if not args.no_cache else None
+
+    if cache:
+        ttl_txt = ", ".join(f"{k}={v // 3600}ч" if v > 0 else f"{k}=∞" for k, v in ttl_map.items())
+        print(f"Кэш: {cache_path} (записей: {len(cache.entries)}, TTL: {ttl_txt})")
+        try:
+            enr = enrich_cached_ok_geo(cache)
+            if enr > 0:
+                print(f"Кэш: обогащено гео-данными {enr} записей AGY-OK")
+        except Exception:
+            pass
+
+    agy_model = args.agy_model or detect_best_agy_model(agy_bin, cache=cache)
     if agy_model:
         print(f"Модель agy: {agy_model}")
 
@@ -240,20 +252,6 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
                 console.print(
                     "[dim]Проверка будет выполнена в режиме preflight/geo (без обращений к agy).[/dim]"
                 )
-
-    cache_path = Path(args.cache) if args.cache else default_cache_path()
-    ttl_map = {"AGY-OK": args.ttl_ok, "AGY-BLOCK": args.ttl_blocked, "DEAD": args.ttl_dead}
-    cache = ResultCache(path=cache_path, ttl_map=ttl_map) if not args.no_cache else None
-
-    if cache:
-        ttl_txt = ", ".join(f"{k}={v // 3600}ч" if v > 0 else f"{k}=∞" for k, v in ttl_map.items())
-        print(f"Кэш: {cache_path} (записей: {len(cache.entries)}, TTL: {ttl_txt})")
-        try:
-            enr = enrich_cached_ok_geo(cache)
-            if enr > 0:
-                print(f"Кэш: обогащено гео-данными {enr} записей AGY-OK")
-        except Exception:
-            pass
 
     out_dir = args.out or Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -294,22 +292,12 @@ def _collect_and_select_servers(
     cache: ResultCache | None,
     ttl_map: dict[str, int],
 ) -> tuple[list[Server], list[Server], dict[str, int], dict[str, set[str]], list[str]] | None:
-    prefetched_subs: dict[str, bytes] = {}
     selected = set(int(x) for x in args.group)
     if not selected:
         counts: dict[int, int] = {}
         for g in groups:
             gid = g["id"]
-            url = g.get("url")
-            cnt = 0
-            if not args.no_fetch and url:
-                raw_bytes = fetch_subscription(url)
-                if raw_bytes is not None:
-                    prefetched_subs[url] = raw_bytes
-                    cnt = len(parse_subscription(raw_bytes))
-            if cnt == 0:
-                cnt = len(read_profiles_for_group(gid, g.get("name", "")))
-            counts[gid] = cnt
+            counts[gid] = len(read_profiles_for_group(gid, g.get("name", "")))
         selected = interactive_select(groups, counts)
         if not selected:
             return None
@@ -324,7 +312,6 @@ def _collect_and_select_servers(
         groups,
         selected,
         no_fetch=args.no_fetch,
-        prefetched=prefetched_subs,
         filter_insecure=filter_insecure,
     )
     servers = dedupe_servers(raw_servers)

@@ -139,6 +139,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     target_ips = [s.server for s in selected if s.server]
     ports_str = ",".join(sorted({str(s.server_port) for s in selected if s.server_port})) or "443"
     ratings: list[StrategyRating] = []
+    server_rescue_map: dict[str, list[tuple[int, int]]] = {}
 
     # Запускаем локальный релей
     relay_port = args.relay_port
@@ -162,19 +163,30 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                     time.sleep(0.3)
                     rescued = 0
                     latencies: list[int] = []
+                    rescued_servers: list[tuple[Server, int]] = []
+                    failed_reasons: dict[str, int] = {}
+                    server_details: list[tuple[Server, bool, int, str]] = []
+
                     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                         futs = {
                             ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=probe_timeout): srv
                             for srv in selected
                         }
                         for fut in concurrent.futures.as_completed(futs):
+                            srv = futs[fut]
                             try:
-                                ok, lat_ms = fut.result()
-                                if ok:
-                                    rescued += 1
-                                    latencies.append(lat_ms)
-                            except Exception:
-                                pass
+                                ok, lat_ms, reason = fut.result()
+                            except Exception as exc:
+                                ok, lat_ms, reason = False, 0, f"исключение: {exc}"
+
+                            server_details.append((srv, ok, lat_ms, reason))
+                            if ok:
+                                rescued += 1
+                                latencies.append(lat_ms)
+                                rescued_servers.append((srv, lat_ms))
+                                server_rescue_map.setdefault(srv.server, []).append((strat.number, lat_ms))
+                            else:
+                                failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
 
                     avg_lat = int(sum(latencies) / len(latencies)) if latencies else 0
                     rate = rescued / len(selected) if selected else 0
@@ -191,10 +203,29 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                     )
                     ratings.append(r)
                     pct = int(rate * 100)
+                    lat_str = f"{avg_lat} мс" if avg_lat > 0 else "—"
                     print(
                         f"    -> Спасено: {rescued}/{len(selected)} ({pct}%), "
-                        f"задержка: {avg_lat} мс, скор: {score}"
+                        f"задержка: {lat_str}, скор: {score}"
                     )
+
+                    # Вывод спасенных узлов
+                    if rescued_servers:
+                        for srv, lat_val in rescued_servers:
+                            print(f"       [+] Спасен: {srv.server}:{srv.server_port} ({lat_val} мс) — {srv.name[:35]}")
+
+                    # Вывод причин сбоев
+                    if failed_reasons:
+                        reasons_str = ", ".join(
+                            f"{r}: {cnt}" for r, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1])
+                        )
+                        print(f"       [-] Причины сбоев: {reasons_str}")
+
+                    # Детализация при --verbose
+                    if getattr(args, "verbose", False):
+                        for srv, ok, lat_val, reason in server_details:
+                            mark = f"[+] {lat_val} мс" if ok else f"[-] {reason}"
+                            print(f"           * {srv.server}:{srv.server_port} -> {mark}")
             except Exception as exc:
                 print(f"    -> Ошибка запуска стратегии S{strat.number:02d}: {exc}")
 
@@ -224,6 +255,16 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     print("\n" + "=" * 60)
     print(format_benchmark_table(bench_res))
     print("=" * 60)
+
+    if server_rescue_map:
+        print("\n### Спасенные серверы и эффективные стратегии:")
+        for srv in selected:
+            if srv.server in server_rescue_map:
+                res_list = server_rescue_map[srv.server]
+                res_str = ", ".join(f"S{num:02d} ({lat} мс)" for num, lat in res_list)
+                best_s = min(res_list, key=lambda x: x[1])
+                print(f"  - {srv.server}:{srv.server_port} ({srv.name[:35]}): {res_str} -> лучшая S{best_s[0]:02d}")
+
     if best_num:
         print(f"\nРекомендуемая лучшая стратегия для вашего провайдера: S{best_num:02d}")
     else:
@@ -321,6 +362,12 @@ def main(argv: list[str] | None = None) -> int:
         "--no-tcp-verify",
         action="store_true",
         help="Отключить быструю проверку L4 TCP связности перед запуском бенчмарка",
+    )
+    p_bench.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Подробная детализация причин сбоев по каждому серверу в консоли",
     )
     p_bench.set_defaults(func=cmd_benchmark)
 

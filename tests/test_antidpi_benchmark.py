@@ -88,9 +88,10 @@ def test_apply_relay_detour() -> None:
 def test_probe_proxy_tunnel_invalid() -> None:
     srv = make_srv("127.0.0.1", RESULT_DEAD)
     srv.import_obj = {}
-    ok, lat = probe_proxy_tunnel(srv)
+    ok, lat, reason = probe_proxy_tunnel(srv)
     assert not ok
     assert lat == 0
+    assert "import_obj" in reason
 
 
 def test_save_and_load_ratings(tmp_path: Path) -> None:

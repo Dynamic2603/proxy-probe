@@ -9,6 +9,8 @@ import os
 import socket
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,7 @@ from ..engines import (
     xray_shorthand_to_v2ray,
 )
 from ..models import RESULT_BLOCK, RESULT_OK, Server
-from ..prober import preflight_check
+from ..prober import PREFLIGHT_URL
 from .models import AntidpiBenchmarkResult
 
 logger = logging.getLogger(__name__)
@@ -206,18 +208,18 @@ def probe_proxy_tunnel(
     relay_port: int = DEFAULT_RELAY_PORT,
     timeout: float = 2.0,
     bin_dir: Path | None = None,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, str]:
     """Запускает изолированный прокси-туннель через zapret-relay и проверяет связность (preflight).
 
-    Возвращает (success, latency_ms).
+    Возвращает (success, latency_ms, reason).
     """
     if not srv.import_obj or not isinstance(srv.import_obj, dict):
-        return False, 0
+        return False, 0, "нет import_obj"
 
     is_xray = srv.engine == "xray" or (not srv.engine and bool(srv.import_obj.get("protocol")))
     target_bin = (bin_dir or app_bin_dir()) / ("xray.exe" if is_xray else "sing-box.exe")
     if not target_bin.is_file():
-        return False, 0
+        return False, 0, f"бинарник {target_bin.name} не найден"
 
     local_port = alloc_port()
     relay_outbound = build_relay_outbound(is_xray, relay_port)
@@ -246,11 +248,11 @@ def probe_proxy_tunnel(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             env=clean_env,
         )
-    except OSError:
-        return False, 0
+    except OSError as exc:
+        return False, 0, f"сбой запуска: {exc}"
 
     try:
         if proc.stdin is not None:
@@ -258,12 +260,48 @@ def probe_proxy_tunnel(
             proc.stdin.close()
 
         if not wait_port(local_port, proc, timeout=1.5):
-            return False, 0
+            err_snip = ""
+            if proc.poll() is not None and proc.stderr:
+                try:
+                    raw_err = proc.stderr.read()
+                    err_snip = raw_err.decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+            if err_snip:
+                first_line = err_snip.splitlines()[0]
+                return False, 0, f"движок упал ({first_line[:40]})"
+            return False, 0, "таймаут старта движка"
 
+        proxy_url = f"http://127.0.0.1:{local_port}"
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+        req = urllib.request.Request(PREFLIGHT_URL, headers={"User-Agent": "curl/7.88.1"})
         t0 = time.time()
-        ok = preflight_check(local_port, timeout=timeout)
-        latency_ms = int((time.time() - t0) * 1000) if ok else 0
-        return ok, latency_ms
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                code = getattr(resp, "status", getattr(resp, "code", 200))
+                lat_ms = int((time.time() - t0) * 1000)
+                if code in (200, 204):
+                    return True, lat_ms, "OK"
+                return False, 0, f"HTTP {code}"
+        except urllib.error.HTTPError as exc:
+            return False, 0, f"HTTP {exc.code}"
+        except TimeoutError:
+            return False, 0, f"таймаут туннеля (>{timeout}с)"
+        except urllib.error.URLError as exc:
+            reason_str = str(exc.reason).lower()
+            if "timed out" in reason_str:
+                return False, 0, f"таймаут туннеля (>{timeout}с)"
+            elif "connection reset" in reason_str or "10054" in reason_str:
+                return False, 0, "сброс соединения (DPI RST)"
+            elif "eof" in reason_str:
+                return False, 0, "обрыв соединения (EOF)"
+            elif "certificate" in reason_str or "ssl" in reason_str:
+                return False, 0, "ошибка TLS сертификата"
+            return False, 0, f"ошибка сети ({str(exc.reason)[:30]})"
+        except Exception as exc:
+            return False, 0, f"сбой ({type(exc).__name__})"
     finally:
         with contextlib.suppress(Exception):
             proc.terminate()

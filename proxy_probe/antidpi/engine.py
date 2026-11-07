@@ -33,7 +33,12 @@ atexit.register(_cleanup_active_runners)
 
 
 def default_zapret_dir() -> Path:
-    """Возвращает каталог для бинарников Zapret2 (bin/zapret/)."""
+    """Возвращает каталог для бинарников Zapret2 (bin/zapret/ или PROXY_PROBE_ZAPRET_DIR)."""
+    import os
+
+    custom = os.environ.get("PROXY_PROBE_ZAPRET_DIR")
+    if custom and Path(custom).is_dir():
+        return Path(custom)
     return project_root() / "bin" / "zapret"
 
 

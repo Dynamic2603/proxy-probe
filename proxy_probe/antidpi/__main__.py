@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import cProfile
 import datetime as _dt
 import logging
 import pstats
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 from ..cache import ResultCache, default_cache_path
+from ..engines import project_root
 from ..models import Server
 from ..parsers import extract_host_port
 from .benchmark import (
@@ -22,6 +26,7 @@ from .benchmark import (
     select_dead_servers,
 )
 from .catalogue import fetch_catalogue, get_golden_strategies, get_strategy_by_number
+from .elevation import TeeOutput, is_admin, run_elevated_and_wait
 from .engine import WinwsRunner, ensure_zapret_binaries
 from .models import AntidpiBenchmarkResult, StrategyRating
 from .relay import DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, ZapretRelay
@@ -110,6 +115,48 @@ def collect_dead_candidates(cache: ResultCache) -> list[Server]:
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
+    if not is_admin() and not getattr(args, "no_elevate", False):
+        log_path = default_ratings_path().parent / "benchmark_run.log"
+        if log_path.is_file():
+            with contextlib.suppress(Exception):
+                log_path.unlink()
+
+        print("=" * 70)
+        print("  proxy-probe: Запрос прав Администратора для WinDivert (Zapret2)")
+        print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
+        print("=" * 70)
+
+        raw_argv = getattr(args, "_raw_argv", sys.argv[1:])
+        extra_args = [arg for arg in raw_argv if arg != "--no-elevate"]
+        if not extra_args or extra_args[0] != "benchmark":
+            extra_args = ["benchmark", *extra_args]
+        if "--log-output" not in extra_args:
+            extra_args.extend(["--log-output", str(log_path)])
+
+        elev_params = subprocess.list2cmdline(["-m", "proxy_probe.antidpi", *extra_args])
+
+        try:
+            rc = run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
+            if log_path.is_file():
+                with contextlib.suppress(Exception):
+                    content = log_path.read_text(encoding="utf-8", errors="replace")
+                    if content.strip():
+                        print(content)
+            return rc
+        except PermissionError as exc:
+            print(f"\n[!] {exc}", file=sys.stderr)
+            return 1223
+        except Exception as exc:
+            print(f"\n[!] Ошибка вызова UAC: {exc}", file=sys.stderr)
+            return 1
+
+    log_out = getattr(args, "log_output", None)
+    cm = TeeOutput(Path(log_out)) if log_out else contextlib.nullcontext()
+    with cm:
+        return _run_benchmark(args)
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
     cache_path = default_cache_path()
     if not cache_path.is_file():
         print(f"Файл кэша {cache_path} не найден. Сначала выполните прогон proxy-probe.", file=sys.stderr)
@@ -275,6 +322,32 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    if not is_admin() and not getattr(args, "no_elevate", False):
+        print("=" * 70)
+        print("  proxy-probe: Запрос прав Администратора для WinDivert (Zapret2)")
+        print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
+        print("=" * 70)
+
+        raw_argv = getattr(args, "_raw_argv", sys.argv[1:])
+        extra_args = [arg for arg in raw_argv if arg != "--no-elevate"]
+        if not extra_args or extra_args[0] != "serve":
+            extra_args = ["serve", *extra_args]
+
+        elev_params = subprocess.list2cmdline(["-m", "proxy_probe.antidpi", *extra_args])
+
+        try:
+            return run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
+        except PermissionError as exc:
+            print(f"\n[!] {exc}", file=sys.stderr)
+            return 1223
+        except Exception as exc:
+            print(f"\n[!] Ошибка вызова UAC: {exc}", file=sys.stderr)
+            return 1
+
+    return _run_serve(args)
+
+
+def _run_serve(args: argparse.Namespace) -> int:
     ratings = load_ratings()
     strat_num = args.strategy or (ratings.best_strategy_number if ratings else 1) or 1
     strat = get_strategy_by_number(strat_num)
@@ -369,14 +442,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Подробная детализация причин сбоев по каждому серверу в консоли",
     )
+    p_bench.add_argument(
+        "--no-elevate",
+        action="store_true",
+        help="Не запрашивать повышение прав через UAC автоматически",
+    )
+    p_bench.add_argument(
+        "--log-output",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     p_bench.set_defaults(func=cmd_benchmark)
 
     p_serve = sub.add_parser("serve", help="Запустить постоянный изолированный локальный SOCKS5-релей")
     p_serve.add_argument("--port", type=int, default=DEFAULT_RELAY_PORT, help="Порт SOCKS5 (по умолчанию 10850)")
     p_serve.add_argument("--strategy", type=int, default=None, help="Номер стратегии (по умолчанию лучшая из рейтинга)")
+    p_serve.add_argument(
+        "--no-elevate",
+        action="store_true",
+        help="Не запрашивать повышение прав через UAC автоматически",
+    )
     p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
+    args._raw_argv = list(argv) if argv is not None else sys.argv[1:]
     if not hasattr(args, "func"):
         parser.print_help()
         return 0

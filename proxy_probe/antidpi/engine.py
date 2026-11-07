@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import hashlib
 import ipaddress
 import logging
@@ -108,8 +109,9 @@ def ensure_zapret_binaries(
     return target_dir
 
 
+@functools.lru_cache(maxsize=2048)
 def resolve_ip(target: str) -> str | None:
-    """Нормализует целевой хост в IPv4 адрес для WinDivert."""
+    """Нормализует целевой хост в IPv4 адрес для WinDivert (кэшировано в памяти)."""
     target = target.strip()
     if not target:
         return None
@@ -123,12 +125,14 @@ def resolve_ip(target: str) -> str | None:
             return None
 
 
-def build_windivert_filter(target_ips: set[str] | list[str]) -> str:
+def build_windivert_filter(target_ips: set[str] | list[str], max_ips: int = 150) -> str:
     """Формирует строгий WinDivert raw-фильтр только по целевым IP адресам (SSOT/Безопасность).
 
     Гарантирует 100% изоляцию: если список IP пуст, выбрасывает исключение во избежание
     случайного глобального перехвата системного трафика.
     Использует корректный синтаксис WinDivert (логическое 'or' вместо неподдерживаемого 'in').
+    Ограничивает число IP (по умолчанию 150) для строгого соблюдения лимитов
+    длины фильтра WinDivert (WINDIVERT_FILTER_MAX_LEN = 8192 байт) и командной строки Windows.
     """
     resolved: set[str] = set()
     for item in target_ips:
@@ -139,6 +143,14 @@ def build_windivert_filter(target_ips: set[str] | list[str]) -> str:
     cleaned = sorted(resolved)
     if not cleaned:
         raise ValueError("Список целевых IP пуст. Глобальный перехват трафика запрещен!")
+
+    if len(cleaned) > max_ips:
+        logger.warning(
+            "Список целевых IP (%d) ограничен первыми %d для соблюдения лимитов WinDivert (8KB).",
+            len(cleaned),
+            max_ips,
+        )
+        cleaned = cleaned[:max_ips]
 
     if len(cleaned) == 1:
         return f"ip.DstAddr == {cleaned[0]}"

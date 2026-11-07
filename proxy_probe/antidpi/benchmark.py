@@ -110,7 +110,7 @@ def select_dead_servers(
     candidates.sort(key=_rank)
 
     if not verify_tcp or not candidates:
-        return candidates[:limit] if limit > 0 else candidates
+        return candidates[:limit] if limit > 0 else candidates[:100]
 
     def _is_tcp_alive(srv: Server) -> bool:
         try:
@@ -119,8 +119,8 @@ def select_dead_servers(
         except Exception:
             return False
 
-    effective_limit = limit if limit > 0 else len(candidates)
-    chunk_size = max(effective_limit * 2, 30)
+    effective_limit = limit if limit > 0 else 100
+    chunk_size = max(min(effective_limit * 2, 200), 30)
     verified: list[Server] = []
     for idx in range(0, len(candidates), chunk_size):
         chunk = candidates[idx : idx + chunk_size]
@@ -187,14 +187,19 @@ def prepare_strategies_for_level(
         selected = []
         seen = set()
         for r in living:
-            if r.strategy_number in cat_by_num:
+            if r.score > 0 and r.strategy_number in cat_by_num:
                 selected.append(cat_by_num[r.strategy_number])
                 seen.add(r.strategy_number)
             if len(selected) >= 15:
                 break
-        # Если живой рейтинг пуст, фоллбэк на срез разнообразия
-        if not selected:
-            selected = select_mechanical_diversity_sample(catalogue, limit=20)
+        # Если живой рейтинг пуст или содержит мало работающих стратегий, дополняем срезом разнообразия
+        if len(selected) < 15:
+            for p in select_mechanical_diversity_sample(catalogue, limit=25):
+                if p.number not in seen:
+                    selected.append(p)
+                    seen.add(p.number)
+                if len(selected) >= 15:
+                    break
         return selected
 
     # strategy_mode == "all": все 484 стратегии, причем проверенные ранее лидеры идут первыми

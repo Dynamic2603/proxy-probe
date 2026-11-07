@@ -58,9 +58,9 @@ CALIBRATION_LEVELS: dict[int, CalibrationLevelConfig] = {
     ),
     3: CalibrationLevelConfig(
         level=3,
-        title="Уровень 3: Расширенная калибровка на полном пуле серверов",
+        title="Уровень 3: Расширенная калибровка на пуле живых серверов",
         cmd_file="calibrate_level3.cmd",
-        server_limit=0,
+        server_limit=100,
         strategy_mode="top_living",
         timeout=2.5,
         next_cmd_file="calibrate_level4.cmd",

@@ -47,6 +47,14 @@ def test_build_windivert_filter_empty_raises() -> None:
         build_windivert_filter(["", "  "])
 
 
+def test_build_windivert_filter_caps_max_ips() -> None:
+    # 200 уникальных IP адресов
+    many_ips = [f"10.0.{i // 250}.{i % 250}" for i in range(200)]
+    flt = build_windivert_filter(many_ips, max_ips=50)
+    # Должно быть ровно 50 ip.DstAddr
+    assert flt.count("ip.DstAddr ==") == 50
+
+
 def test_build_command_line(tmp_path: Path) -> None:
     strat = make_test_strategy(1)
     winws_exe = tmp_path / "winws.exe"

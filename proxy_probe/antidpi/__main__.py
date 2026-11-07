@@ -197,7 +197,10 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     zapret_dir = ensure_zapret_binaries()
 
     target_ips = [s.server for s in selected if s.server]
-    ports_str = ",".join(sorted({str(s.server_port) for s in selected if s.server_port})) or "443"
+    ports = sorted({str(s.server_port) for s in selected if s.server_port})
+    if len(ports) > 20:
+        ports = ports[:20]
+    ports_str = ",".join(ports) or "443"
     ratings: list[StrategyRating] = []
     server_rescue_map: dict[str, list[tuple[int, int]]] = {}
 

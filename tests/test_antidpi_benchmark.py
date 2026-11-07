@@ -232,6 +232,20 @@ def test_prepare_strategies_for_level() -> None:
     assert l2[0].number == 2
     assert l2[1].number == 1
 
+    # Уровень 3: ТОП живого рейтинга (S2) + дополнение каталогом (S1)
+    l3 = prepare_strategies_for_level(3, catalogue, living)
+    assert len(l3) == 2
+    assert l3[0].number == 2
+    assert l3[1].number == 1
+
+
+def test_select_dead_servers_safe_ceiling() -> None:
+    # Генерируем 150 серверов
+    servers = [make_srv(f"192.168.1.{i}", RESULT_DEAD) for i in range(150)]
+    # limit=0 должен быть безопасно ограничен потолком 100
+    selected = select_dead_servers(servers, limit=0, verify_tcp=False)
+    assert len(selected) == 100
+
 
 def test_select_dead_servers_ranking() -> None:
     s_l4_dead = make_srv("1.1.1.1", RESULT_DEAD)

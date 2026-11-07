@@ -44,6 +44,16 @@ def default_zapret_dir() -> Path:
     return project_root() / "bin" / "zapret"
 
 
+def resolve_winws_bin(zapret_dir: Path | None = None) -> Path:
+    """Определяет исполняемый файл Zapret (предпочитая нативный winws2.exe для Zapret 2)."""
+    zdir = zapret_dir or default_zapret_dir()
+    for name in ("winws2.exe", "winws.exe"):
+        candidate = zdir / name
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"winws2.exe или winws.exe не найден в {zdir}")
+
+
 def ensure_zapret_binaries(
     zapret_dir: Path | None = None,
     url: str = ZAPRET_BUNDLE_URL,
@@ -51,12 +61,14 @@ def ensure_zapret_binaries(
 ) -> Path:
     """Скачивает и распаковывает официальный zapret-win-bundle от bol-van с проверкой SHA-256."""
     target_dir = zapret_dir or default_zapret_dir()
+    winws2_exe = target_dir / "winws2.exe"
     winws_exe = target_dir / "winws.exe"
     cygwin_dll = target_dir / "cygwin1.dll"
     divert_dll = target_dir / "WinDivert.dll"
     divert_sys = target_dir / "WinDivert64.sys"
 
-    if winws_exe.is_file() and cygwin_dll.is_file() and divert_dll.is_file() and divert_sys.is_file():
+    has_winws = winws2_exe.is_file() or winws_exe.is_file()
+    if has_winws and cygwin_dll.is_file() and divert_dll.is_file() and divert_sys.is_file():
         return target_dir
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +128,7 @@ def build_windivert_filter(target_ips: set[str] | list[str]) -> str:
 
     Гарантирует 100% изоляцию: если список IP пуст, выбрасывает исключение во избежание
     случайного глобального перехвата системного трафика.
+    Использует корректный синтаксис WinDivert (логическое 'or' вместо неподдерживаемого 'in').
     """
     resolved: set[str] = set()
     for item in target_ips:
@@ -129,11 +142,11 @@ def build_windivert_filter(target_ips: set[str] | list[str]) -> str:
 
     if len(cleaned) == 1:
         return f"ip.DstAddr == {cleaned[0]}"
-    return f"ip.DstAddr in {{ {', '.join(cleaned)} }}"
+    return "(" + " or ".join(f"ip.DstAddr == {ip}" for ip in cleaned) + ")"
 
 
 class WinwsRunner:
-    """Изолированный раннер Zapret2 winws с ограничением перехвата только по целевым IP."""
+    """Изолированный раннер Zapret2 winws2 с ограничением перехвата только по целевым IP."""
 
     def __init__(
         self,
@@ -149,10 +162,8 @@ class WinwsRunner:
         self.process: subprocess.Popen | None = None
 
     def build_command_line(self) -> list[str]:
-        """Строит аргументы вызова winws.exe со строгим IP-фильтром."""
-        winws_exe = self.zapret_dir / "winws.exe"
-        if not winws_exe.is_file():
-            raise FileNotFoundError(f"winws.exe не найден в {self.zapret_dir}")
+        """Строит аргументы вызова winws2.exe со строгим IP-фильтром."""
+        winws_exe = resolve_winws_bin(self.zapret_dir)
 
         raw_filter = build_windivert_filter(self.target_ips)
 
@@ -161,10 +172,9 @@ class WinwsRunner:
             "--wf-filter-lan=1",
             f"--wf-tcp-out={self.ports}",
             f"--wf-raw-filter={raw_filter}",
-            "--bind-fix4",
         ]
 
-        # Подключение Lua библиотек zapret
+        # Подключение Lua библиотек zapret2
         lua_dir = self.zapret_dir / "lua"
         lib_lua = lua_dir / "zapret-lib.lua"
         antidpi_lua = lua_dir / "zapret-antidpi.lua"
@@ -172,6 +182,11 @@ class WinwsRunner:
             cmd.append(f"--lua-init=@{lib_lua}")
         if antidpi_lua.is_file():
             cmd.append(f"--lua-init=@{antidpi_lua}")
+
+        cmd.append("--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')")
+
+        if self.strategy.init_script:
+            cmd.append(f"--lua-init={self.strategy.init_script}")
 
         actual_guard = self.zapret_dir / "actual_tls_guard.lua"
         if actual_guard.is_file() and any("blob=reasm_data" in a for a in self.strategy.args):
@@ -182,7 +197,7 @@ class WinwsRunner:
         return cmd
 
     def start(self) -> None:
-        """Запускает winws.exe и проверяет, что драйвер WinDivert успешно поднялся."""
+        """Запускает winws2.exe и проверяет, что драйвер WinDivert успешно поднялся."""
         if self.process is not None:
             return
 
@@ -206,16 +221,17 @@ class WinwsRunner:
             raise
         _ACTIVE_RUNNERS.add(self)
 
-        # Даем процессу 150мс проверить инициализацию драйвера WinDivert
-        time.sleep(0.15)
+        # Даем процессу 350мс проверить инициализацию драйвера WinDivert и загрузку Lua
+        time.sleep(0.35)
         if self.process.poll() is not None:
             out, err = self.process.communicate()
             _ACTIVE_RUNNERS.discard(self)
+            rc = self.process.returncode
             self.process = None
-            raise RuntimeError(f"Сбой старта winws (exit {self.process}): {err.strip() or out.strip()}")
+            raise RuntimeError(f"Сбой старта {Path(cmd[0]).name} (код {rc}): {err.strip() or out.strip()}")
 
     def stop(self) -> None:
-        """Останавливает winws.exe, гарантируя закрытие дескриптора WinDivert."""
+        """Останавливает winws2.exe, гарантируя закрытие дескриптора WinDivert."""
         _ACTIVE_RUNNERS.discard(self)
         if self.process is None:
             return
@@ -223,13 +239,18 @@ class WinwsRunner:
         p = self.process
         self.process = None
 
-        if p.poll() is None:
-            p.terminate()
-            try:
-                p.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait(timeout=1.0)
+        if p.poll() is not None:
+            if p.returncode != 0:
+                out, err = p.communicate()
+                logger.warning("winws завершился досрочно с кодом %s: %s", p.returncode, err.strip() or out.strip())
+            return
+
+        p.terminate()
+        try:
+            p.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait(timeout=1.0)
 
     def __enter__(self) -> WinwsRunner:
         self.start()

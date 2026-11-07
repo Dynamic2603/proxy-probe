@@ -37,7 +37,7 @@ def test_build_windivert_filter_single_ip() -> None:
 
 def test_build_windivert_filter_multiple_ips() -> None:
     res = build_windivert_filter(["2.2.2.2", "1.1.1.1", "1.1.1.1"])
-    assert res == "ip.DstAddr in { 1.1.1.1, 2.2.2.2 }"
+    assert res == "(ip.DstAddr == 1.1.1.1 or ip.DstAddr == 2.2.2.2)"
 
 
 def test_build_windivert_filter_empty_raises() -> None:
@@ -69,12 +69,21 @@ def test_build_command_line(tmp_path: Path) -> None:
     assert cmd[0] == str(winws_exe)
     assert "--wf-filter-lan=1" in cmd
     assert "--wf-tcp-out=443,8443" in cmd
-    assert '--wf-raw-filter=ip.DstAddr in { 1.1.1.1, 2.2.2.2 }' in cmd
-    assert "--bind-fix4" in cmd
+    assert '--wf-raw-filter=(ip.DstAddr == 1.1.1.1 or ip.DstAddr == 2.2.2.2)' in cmd
     assert any("zapret-lib.lua" in arg for arg in cmd)
     assert any("zapret-antidpi.lua" in arg for arg in cmd)
+    assert any("fake_default_tls" in arg for arg in cmd)
     assert "--payload=tls_client_hello" in cmd
     assert "--lua-desync=multisplit:pos=1,midsld" in cmd
+
+
+def test_resolve_winws_bin_prefers_winws2(tmp_path: Path) -> None:
+    (tmp_path / "winws.exe").write_text("v1", encoding="utf-8")
+    (tmp_path / "winws2.exe").write_text("v2", encoding="utf-8")
+    from proxy_probe.antidpi.engine import resolve_winws_bin
+
+    chosen = resolve_winws_bin(tmp_path)
+    assert chosen.name == "winws2.exe"
 
 
 def test_winws_runner_lifecycle(tmp_path: Path) -> None:

@@ -706,16 +706,38 @@ def _execute_antidpi_stage(
     from .antidpi.relay import ZapretRelay
     from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
 
-    dead_candidates = [s for s in servers if s.result == RESULT_DEAD and s.server]
-    if not dead_candidates:
-        console.print("[dim]Anti-DPI: серверов со статусом DEAD нет, запуск релея не требуется.[/dim]")
+    # Кандидаты на спасение — свежепроверенные серверы текущего прогона (to_probe),
+    # отсекая те, у которых порт закрыт на уровне L4 TCP (нет смысла спасать закрытый сокет).
+    # Дедуплицируем по эндпоинту (по 1 представителю) и ограничиваем до 150 узлов (лимит WinDivert).
+    candidates_pool = to_probe if to_probe else servers
+    raw_candidates = [
+        s for s in candidates_pool
+        if s.result == RESULT_DEAD
+        and s.server
+        and not (s.note and "L4 TCP" in s.note)
+    ]
+    if not raw_candidates:
+        console.print(
+            "[dim]Anti-DPI: серверов с открытым TCP сокетом для спасения нет, запуск релея не требуется.[/dim]"
+        )
         return 0
+
+    seen_endpoints: set[tuple[str, int]] = set()
+    dead_candidates: list[Server] = []
+    for s in raw_candidates:
+        ep = (s.server, s.server_port)
+        if ep not in seen_endpoints:
+            seen_endpoints.add(ep)
+            dead_candidates.append(s)
+            if len(dead_candidates) >= 150:
+                break
 
     target_ips = {s.server for s in dead_candidates if s.server}
     if not target_ips:
         return 0
 
-    ports_str = ",".join(sorted({str(s.server_port) for s in dead_candidates if s.server_port})) or "443"
+    ports_set = sorted({str(s.server_port) for s in dead_candidates if s.server_port})
+    ports_str = ",".join(ports_set[:16]) or "443"
 
     try:
         current_isp = detect_current_isp(explicit_override=ctx.isp)
@@ -777,7 +799,12 @@ def _execute_antidpi_stage(
             registry = ProcessRegistry()
             stop_event = threading.Event()
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(dead_candidates), 4)) as ex:
+            stage2_timeouts = dict(timeouts)
+            stage2_timeouts["probe"] = min(timeouts.get("probe", 10.0), 5.0)
+            stage2_timeouts["start"] = min(timeouts.get("start", 6.0), 4.0)
+
+            workers = min(len(dead_candidates), getattr(ctx, "jobs", 16), 16)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futures = {}
                 for s in dead_candidates:
                     patched_obj = apply_relay_detour(s.import_obj, is_xray=(s.engine == "xray"))
@@ -791,7 +818,7 @@ def _execute_antidpi_stage(
                         bin_path,
                         s.engine == "xray",
                         patched_obj,
-                        timeouts,
+                        stage2_timeouts,
                         ctx.agy_bin,
                         print_timeout,
                         agy_model=model,

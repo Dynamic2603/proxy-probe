@@ -195,6 +195,8 @@ def build_windivert_filter(target_ips: set[str] | list[str], max_ips: int = 150)
         ip = resolve_ip(str(item))
         if ip:
             resolved.add(ip)
+            if len(resolved) >= max_ips * 2:
+                break
 
     cleaned = sorted(resolved)
     if not cleaned:
@@ -237,10 +239,14 @@ class WinwsRunner:
 
         raw_filter = build_windivert_filter(self.target_ips)
 
+        # Ограничиваем число TCP-портов первыми 16 для предотвращения переполнения фильтра WinDivert (код 87)
+        port_parts = [p.strip() for p in self.ports.split(",") if p.strip()]
+        safe_ports = ",".join(port_parts[:16]) if len(port_parts) > 16 else self.ports
+
         cmd = [
             str(winws_exe),
             "--wf-filter-lan=1",
-            f"--wf-tcp-out={self.ports}",
+            f"--wf-tcp-out={safe_ports}",
             f"--wf-raw-filter={raw_filter}",
         ]
 

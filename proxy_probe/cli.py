@@ -338,6 +338,9 @@ def _collect_and_select_servers(
             s.result = res
             s.country = rec.get("country", "")
             s.ip_out = rec.get("ip_out", "")
+            s.country_code = rec.get("country_code", "")
+            s.city = rec.get("city", "")
+            s.org = rec.get("org", "")
             s.latency_ms = rec.get("latency_ms", 0)
             s.note = rec.get("note", "")
             cached_counts[res] = cached_counts.get(res, 0) + 1
@@ -481,6 +484,9 @@ def _execute_probe_pool(
             server.result = probe_res["result"]
             server.country = probe_res.get("country", "")
             server.ip_out = probe_res.get("ip_out", "")
+            server.country_code = probe_res.get("country_code", "")
+            server.city = probe_res.get("city", "")
+            server.org = probe_res.get("org", "")
             server.latency_ms = probe_res.get("latency_ms", 0)
             server.note = probe_res.get("note", "")
         completed_count += 1

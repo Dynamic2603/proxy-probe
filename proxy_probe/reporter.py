@@ -75,7 +75,7 @@ def write_report(
         key=lambda s: (RESULT_TABLE_ORDER.get(s.result, 99), s.index),
     )
     for s in sorted_servers:
-        name = (s.name or "").replace("|", "\\|")[:60]
+        name = (s.formatted_tag or s.name or "").replace("|", "\\|")[:80]
         note = (s.note or "").replace("|", "\\|").replace("\n", " ").strip()
         lines.append(
             f"| {s.index} | {s.result or '—'} | {s.group_name} | {s.engine} | {s.server}:{s.server_port} | "
@@ -93,28 +93,64 @@ def write_import_file(
     sb: list[dict] = []
     xr: list[dict] = []
 
+    def _prepare_obj(srv: Server) -> dict:
+        obj = dict(srv.import_obj)
+        obj["tag"] = srv.formatted_tag
+        return obj
+
     if cache is not None:
         sorted_entries = sorted(cache.entries.items(), key=lambda kv: kv[0])
-        for host_port, entry in sorted_entries:
+        for entry_key, entry in sorted_entries:
             if entry.get("result") != RESULT_OK:
                 continue
-            if not cache.is_valid(host_port):
+            if not cache.is_valid(entry_key):
                 continue
-            obj = entry.get("import_obj")
-            if not isinstance(obj, dict):
+            raw_obj = entry.get("import_obj")
+            if not isinstance(raw_obj, dict):
                 continue
             eng = str(entry.get("engine") or "")
-            if eng == "xray" or (not eng and obj.get("protocol")):
-                xr.append(obj)
+            if not eng:
+                eng = "xray" if raw_obj.get("protocol") else "sing-box"
+
+            host = str(raw_obj.get("server") or "")
+            port = int(raw_obj.get("server_port") or 0)
+            if not host:
+                sett = raw_obj.get("settings")
+                if isinstance(sett, dict):
+                    host = str(sett.get("address") or "")
+                    port = int(sett.get("port") or 0)
+
+            s = Server(
+                group_id=0,
+                group_name="",
+                name=str(raw_obj.get("tag", "")),
+                engine=eng,
+                server=host,
+                server_port=port,
+                import_obj=raw_obj,
+                source="cache",
+                country=str(entry.get("country", "")),
+                ip_out=str(entry.get("ip_out", "")),
+                country_code=str(entry.get("country_code", "")),
+                city=str(entry.get("city", "")),
+                org=str(entry.get("org", "")),
+            )
+            prepared = _prepare_obj(s)
+            if eng == "xray" or (not eng and raw_obj.get("protocol")):
+                xr.append(prepared)
             else:
-                sb.append(obj)
+                sb.append(prepared)
     elif fallback_servers:
         ok = sorted(
             [s for s in fallback_servers if s.result == RESULT_OK],
             key=lambda s: s.host_port,
         )
-        sb = [s.import_obj for s in ok if s.engine == "sing-box"]
-        xr = [s.import_obj for s in ok if s.engine == "xray"]
+        for s in ok:
+            prepared = _prepare_obj(s)
+            if s.engine == "xray":
+                xr.append(prepared)
+            else:
+                sb.append(prepared)
 
     if path.exists() and path.stat().st_size > 0:
         try:

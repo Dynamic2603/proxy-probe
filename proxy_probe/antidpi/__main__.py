@@ -29,6 +29,7 @@ from .benchmark import (
 from .catalogue import fetch_catalogue, get_strategy_by_number, load_catalogue
 from .elevation import TeeOutput, is_admin, run_elevated_and_wait
 from .engine import WinwsRunner, ensure_zapret_binaries
+from .isp import IspDetectionError, detect_current_isp
 from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, StrategyRating
 from .relay import DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, ZapretRelay
 
@@ -163,6 +164,18 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     print(f"  proxy-probe: {cfg.title}")
     print("=" * 65)
 
+    # Определение входящего интернет-провайдера (Ingress ISP / ASN)
+    print("\nОпределение текущего входящего интернет-провайдера (Ingress ISP)...")
+    try:
+        current_isp = detect_current_isp(explicit_override=getattr(args, "isp", None))
+        print(f"[✓] Провайдер: {current_isp.display_name} (IP: {current_isp.ingress_ip or '—'})")
+    except IspDetectionError as err:
+        print("\n" + "=" * 65, file=sys.stderr)
+        print("  [ERROR] Не удалось определить входящего интернет-провайдера!", file=sys.stderr)
+        print(f"  {err}", file=sys.stderr)
+        print("=" * 65, file=sys.stderr)
+        return 1
+
     cache_path = default_cache_path()
     if not cache_path.is_file():
         print(f"Файл кэша {cache_path} не найден. Сначала выполните прогон proxy-probe (run.cmd).", file=sys.stderr)
@@ -185,7 +198,7 @@ def _run_benchmark(args: argparse.Namespace) -> int:
         print(f"  ... и еще {len(selected) - 15} серверов")
 
     catalogue = load_catalogue()
-    living_ratings = load_ratings()
+    living_ratings = load_ratings(isp_identity=current_isp)
     test_strategies = prepare_strategies_for_level(level, catalogue, living_ratings)
     if getattr(args, "top", None) is not None and args.top > 0:
         test_strategies = test_strategies[: args.top]
@@ -306,15 +319,20 @@ def _run_benchmark(args: argparse.Namespace) -> int:
         print("\n--- Топ-15 функций по INTERNAL TIME (собственное процессорное время) ---")
         stats.sort_stats(pstats.SortKey.TIME).print_stats(15)
 
-    # Обновляем живой рейтинг
+    # Обновляем живой рейтинг строго для текущего провайдера
     living = living_ratings or AntidpiBenchmarkResult(
         tested_at=_dt.datetime.now().isoformat(),
-        isp="AutoDetected",
+        isp=current_isp.display_name,
+        asn=current_isp.asn,
+        isp_key=current_isp.key,
         best_strategy_number=None,
         ratings=[],
     )
+    living.isp = current_isp.display_name
+    living.asn = current_isp.asn
+    living.isp_key = current_isp.key
     living.merge_benchmark_results(ratings)
-    save_ratings(living)
+    save_ratings(living, isp_identity=current_isp)
 
     print("\n" + "=" * 60)
     print(format_benchmark_table(living))
@@ -383,7 +401,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
-    ratings = load_ratings()
+    current_isp = None
+    with contextlib.suppress(Exception):
+        current_isp = detect_current_isp(explicit_override=getattr(args, "isp", None))
+    ratings = load_ratings(isp_identity=current_isp)
     strat_num = args.strategy or (ratings.best_strategy_number if ratings else 1) or 1
     strat = get_strategy_by_number(strat_num)
     if not strat:
@@ -500,6 +521,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Не запрашивать повышение прав через UAC автоматически",
     )
     p_bench.add_argument(
+        "--isp",
+        type=str,
+        default=None,
+        help="Принудительно указать имя/ASN провайдера (по умолчанию автодетект Ingress сети)",
+    )
+    p_bench.add_argument(
         "--log-output",
         type=str,
         default=None,
@@ -510,6 +537,12 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="Запустить постоянный изолированный локальный SOCKS5-релей")
     p_serve.add_argument("--port", type=int, default=DEFAULT_RELAY_PORT, help="Порт SOCKS5 (по умолчанию 10850)")
     p_serve.add_argument("--strategy", type=int, default=None, help="Номер стратегии (по умолчанию лучшая из рейтинга)")
+    p_serve.add_argument(
+        "--isp",
+        type=str,
+        default=None,
+        help="Принудительно указать имя/ASN провайдера для выбора лучшей стратегии",
+    )
     p_serve.add_argument(
         "--no-elevate",
         action="store_true",

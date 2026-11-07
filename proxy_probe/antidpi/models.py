@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .isp import IspIdentity
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,12 +122,14 @@ class StrategyRating:
 
 @dataclasses.dataclass
 class AntidpiBenchmarkResult:
-    """Сводный локальный живой рейтинг стратегий для текущего провайдера (SSOT)."""
+    """Сводный локальный живой рейтинг стратегий для конкретного провайдера (SSOT)."""
 
     tested_at: str
     isp: str
     best_strategy_number: int | None
     ratings: list[StrategyRating] = dataclasses.field(default_factory=list)
+    asn: int = 0
+    isp_key: str = ""
 
     def sort_ratings(self) -> None:
         """Сортирует стратегии по объективному скору и определяет лучшую."""
@@ -198,6 +204,8 @@ class AntidpiBenchmarkResult:
         return {
             "tested_at": self.tested_at,
             "isp": self.isp,
+            "asn": self.asn,
+            "isp_key": self.isp_key,
             "best_strategy_number": self.best_strategy_number,
             "ratings": [dataclasses.asdict(r) for r in self.ratings],
         }
@@ -227,4 +235,88 @@ class AntidpiBenchmarkResult:
             isp=str(data.get("isp", "")),
             best_strategy_number=data.get("best_strategy_number"),
             ratings=ratings,
+            asn=int(data.get("asn", 0)),
+            isp_key=str(data.get("isp_key", "")),
         )
+
+
+@dataclasses.dataclass
+class AntidpiDatabase:
+    """Многопровайдерное хранилище живых рейтингов Anti-DPI (SSOT)."""
+
+    schema_version: int = 2
+    last_detected_isp: str = ""
+    providers: dict[str, AntidpiBenchmarkResult] = dataclasses.field(default_factory=dict)
+
+    def get_or_create(self, identity: IspIdentity | str) -> AntidpiBenchmarkResult:
+        """Возвращает или создает изолированный профиль для переданного провайдера."""
+        key = getattr(identity, "key", str(identity))
+        isp_name = getattr(identity, "display_name", str(identity))
+        asn = getattr(identity, "asn", 0)
+
+        if key not in self.providers:
+            self.providers[key] = AntidpiBenchmarkResult(
+                tested_at=_dt.datetime.now().isoformat(),
+                isp=isp_name,
+                best_strategy_number=None,
+                ratings=[],
+                asn=asn,
+                isp_key=key,
+            )
+        else:
+            prof = self.providers[key]
+            if isp_name and (not prof.isp or prof.isp == "AutoDetected"):
+                prof.isp = isp_name
+            if asn > 0 and not prof.asn:
+                prof.asn = asn
+            if not prof.isp_key:
+                prof.isp_key = key
+
+        self.last_detected_isp = key
+        return self.providers[key]
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "last_detected_isp": self.last_detected_isp,
+            "providers": {k: v.to_dict() for k, v in self.providers.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, current_identity: IspIdentity | None = None) -> AntidpiDatabase:
+        # 1. Проверяем схему v2 (многопровайдерная)
+        if "providers" in data and isinstance(data["providers"], dict):
+            providers = {
+                k: AntidpiBenchmarkResult.from_dict(v)
+                for k, v in data["providers"].items()
+                if isinstance(v, dict)
+            }
+            for k, p in providers.items():
+                if not p.isp_key:
+                    p.isp_key = k
+            return cls(
+                schema_version=int(data.get("schema_version", 2)),
+                last_detected_isp=str(data.get("last_detected_isp", "")),
+                providers=providers,
+            )
+
+        # 2. Обратная совместимость: прозрачная миграция схемы v1
+        if "ratings" in data:
+            v1_res = AntidpiBenchmarkResult.from_dict(data)
+            target_key = (
+                current_identity.key
+                if current_identity
+                else (f"AS{v1_res.asn}_{v1_res.isp}" if v1_res.asn else "migrated_profile")
+            )
+            v1_res.isp_key = target_key
+            if current_identity and (not v1_res.isp or v1_res.isp == "AutoDetected"):
+                v1_res.isp = current_identity.display_name
+                v1_res.asn = current_identity.asn
+
+            return cls(
+                schema_version=2,
+                last_detected_isp=target_key,
+                providers={target_key: v1_res},
+            )
+
+        return cls()

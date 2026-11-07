@@ -232,6 +232,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="порт локального изолированного SOCKS5-релея (по умолчанию 10850)",
     )
     ap.add_argument(
+        "--isp",
+        type=str,
+        default=None,
+        help="принудительно указать имя/ASN провайдера (по умолчанию автодетект Ingress сети)",
+    )
+    ap.add_argument(
         "--no-elevate",
         action="store_true",
         help="не запрашивать повышение прав через UAC автоматически",
@@ -280,6 +286,7 @@ class RuntimeContext:
     antidpi: bool = True
     antidpi_strategy: int | None = None
     antidpi_port: int = 10850
+    isp: str | None = None
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -370,6 +377,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         antidpi=bool(getattr(args, "antidpi", True)),
         antidpi_strategy=getattr(args, "antidpi_strategy", None),
         antidpi_port=int(getattr(args, "antidpi_port", 10850)),
+        isp=getattr(args, "isp", None),
     )
 
 
@@ -694,6 +702,7 @@ def _execute_antidpi_stage(
     from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings, save_ratings
     from .antidpi.catalogue import get_strategy_by_number
     from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
+    from .antidpi.isp import IspDetectionError, detect_current_isp
     from .antidpi.relay import ZapretRelay
     from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
 
@@ -708,8 +717,17 @@ def _execute_antidpi_stage(
 
     ports_str = ",".join(sorted({str(s.server_port) for s in dead_candidates if s.server_port})) or "443"
 
+    try:
+        current_isp = detect_current_isp(explicit_override=ctx.isp)
+        ratings = load_ratings(isp_identity=current_isp)
+        isp_label = f"[{current_isp.display_name}]"
+    except IspDetectionError as err:
+        console.print(
+            f"[yellow]⚠ Stage 2 Anti-DPI пропущен: невозможно определить провайдера сети ({err}).[/yellow]"
+        )
+        return 0
+
     strat_num = ctx.antidpi_strategy
-    ratings = load_ratings()
     if strat_num is None:
         strat_num = (
             ratings.best_strategy_number
@@ -729,7 +747,8 @@ def _execute_antidpi_stage(
         return 0
 
     console.print(
-        f"\n[bold cyan]Stage 2: Anti-DPI Релей[/bold cyan] (стратегия S{strat.number:02d} {strat.name[:35]}, "
+        f"\n[bold cyan]Stage 2: Anti-DPI Релей {isp_label}[/bold cyan] "
+        f"(стратегия S{strat.number:02d} {strat.name[:35]}, "
         f"целей: {len(target_ips)} IP, порт {ctx.antidpi_port})..."
     )
 
@@ -820,9 +839,9 @@ def _execute_antidpi_stage(
         pbar.close()
 
     # Обновляем живой рейтинг на основе реального результата прогона
-    if ratings is not None:
+    if ratings is not None and current_isp is not None:
         ratings.record_live_feedback(strat.number, rescued_count, len(dead_candidates))
-        save_ratings(ratings)
+        save_ratings(ratings, isp_identity=current_isp)
 
     if rescued_count > 0:
         total_dead = len(dead_candidates)

@@ -26,7 +26,8 @@ from ..engines import (
 from ..models import RESULT_BLOCK, RESULT_OK, Server
 from ..prober import PREFLIGHT_URL
 from .catalogue import select_mechanical_diversity_sample
-from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, StrategyProfile
+from .isp import IspIdentity
+from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, AntidpiDatabase, StrategyProfile
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,25 @@ def default_ratings_path() -> Path:
     return project_root() / "data" / DEFAULT_RATINGS_FILENAME
 
 
-def load_ratings(path: Path | None = None) -> AntidpiBenchmarkResult | None:
-    """Загружает сохраненный локальный живой рейтинг стратегий."""
+def load_ratings(
+    path: Path | None = None,
+    isp_identity: IspIdentity | None = None,
+) -> AntidpiBenchmarkResult | None:
+    """Загружает сохраненный локальный живой рейтинг стратегий для указанного или текущего провайдера (SSOT)."""
     p = path or default_ratings_path()
     if not p.is_file():
         return None
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        res = AntidpiBenchmarkResult.from_dict(raw)
+        db = AntidpiDatabase.from_dict(raw, current_identity=isp_identity)
+        if isp_identity:
+            res = db.get_or_create(isp_identity)
+        elif db.last_detected_isp and db.last_detected_isp in db.providers:
+            res = db.providers[db.last_detected_isp]
+        elif db.providers:
+            res = next(iter(db.providers.values()))
+        else:
+            return None
         res.sort_ratings()
         return res
     except Exception as exc:
@@ -54,13 +66,31 @@ def load_ratings(path: Path | None = None) -> AntidpiBenchmarkResult | None:
         return None
 
 
-def save_ratings(result: AntidpiBenchmarkResult, path: Path | None = None) -> None:
-    """Атомарно сохраняет живой рейтинг в JSON-файл (SSOT)."""
+def save_ratings(
+    result: AntidpiBenchmarkResult,
+    path: Path | None = None,
+    isp_identity: IspIdentity | None = None,
+) -> None:
+    """Атомарно обновляет и сохраняет живой рейтинг провайдера в многопровайдерной базе (SSOT)."""
     result.sort_ratings()
     p = path or default_ratings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
+
+    db = AntidpiDatabase()
+    if p.is_file():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            db = AntidpiDatabase.from_dict(raw, current_identity=isp_identity)
+        except Exception as exc:
+            logger.warning("Сбой парсинга базы при сохранении: %s. Пересоздание...", exc)
+
+    key = result.isp_key or (isp_identity.key if isp_identity else (result.isp or "default"))
+    result.isp_key = key
+    db.providers[key] = result
+    db.last_detected_isp = key
+
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(db.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
 
 

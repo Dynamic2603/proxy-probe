@@ -19,6 +19,8 @@ from .parsers import USER_AGENT
 
 SINGBOX_REPO = "SagerNet/sing-box"
 XRAY_REPO = "XTLS/Xray-core"
+DEFAULT_SINGBOX_VERSION = "1.14.1"
+DEFAULT_XRAY_VERSION = "26.9.9"
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -189,6 +191,50 @@ def _download_and_verify_archive(
     tmp.replace(dest)
 
 
+def _download_engine(
+    repo: str,
+    ver: str,
+    asset_name_template: str,
+    target_bin_dir: Path,
+    fallback_version: str | None = None,
+) -> tuple[Path, str]:
+    """Скачивает и валидирует архив движка с автоматическим fallback на стабильную версию при ошибках."""
+    tag = ver if ver.startswith("v") else f"v{ver}"
+    clean_ver = ver.lstrip("v")
+    asset_name = asset_name_template.format(ver=clean_ver)
+    zip_path = target_bin_dir / asset_name
+
+    try:
+        url = _resolve_asset_url(repo, tag, asset_name)
+        if not zip_path.exists():
+            _download_and_verify_archive(url, zip_path, repo, tag, asset_name)
+        else:
+            try:
+                verify_file_against_upstream(zip_path, repo, tag, asset_name)
+            except (SystemExit, Exception):
+                zip_path.unlink(missing_ok=True)
+                _download_and_verify_archive(url, zip_path, repo, tag, asset_name)
+        return zip_path, ver
+    except Exception as e:
+        if fallback_version and fallback_version != ver:
+            print(f"[dim]Не удалось получить {repo} {tag} ({e}), пробуем стабильную v{fallback_version}...[/dim]")
+            fb_tag = fallback_version if fallback_version.startswith("v") else f"v{fallback_version}"
+            fb_clean = fallback_version.lstrip("v")
+            fb_asset = asset_name_template.format(ver=fb_clean)
+            fb_zip = target_bin_dir / fb_asset
+            url_fb = _resolve_asset_url(repo, fb_tag, fb_asset)
+            if not fb_zip.exists():
+                _download_and_verify_archive(url_fb, fb_zip, repo, fb_tag, fb_asset)
+            else:
+                try:
+                    verify_file_against_upstream(fb_zip, repo, fb_tag, fb_asset)
+                except (SystemExit, Exception):
+                    fb_zip.unlink(missing_ok=True)
+                    _download_and_verify_archive(url_fb, fb_zip, repo, fb_tag, fb_asset)
+            return fb_zip, fallback_version
+        raise
+
+
 def ensure_binaries(ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path | None = None) -> tuple[Path, Path]:
     target_bin_dir = bin_dir or app_bin_dir()
     sb_exe = target_bin_dir / "sing-box.exe"
@@ -203,33 +249,26 @@ def ensure_binaries(ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path
             pass
 
     print(f"Скачиваю движки: sing-box v{ver_sb}, Xray v{ver_xr} ...")
-    sb_zip_name = f"sing-box-{ver_sb}-windows-amd64.zip"
-    sb_zip = target_bin_dir / sb_zip_name
-    url_sb = _resolve_asset_url(SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
-    if not sb_zip.exists():
-        _download_and_verify_archive(url_sb, sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
-    else:
-        try:
-            verify_file_against_upstream(sb_zip, SINGBOX_REPO, f"v{ver_sb}", sb_zip_name)
-        except (SystemExit, Exception):
-            sb_zip.unlink(missing_ok=True)
-            raise
+    sb_zip, actual_ver_sb = _download_engine(
+        SINGBOX_REPO,
+        ver_sb,
+        "sing-box-{ver}-windows-amd64.zip",
+        target_bin_dir,
+        fallback_version=DEFAULT_SINGBOX_VERSION,
+    )
     _extract_binary(sb_exe, sb_zip)
 
-    xr_zip_name = "Xray-windows-64.zip"
-    xr_zip = target_bin_dir / xr_zip_name
-    url_xr = _resolve_asset_url(XRAY_REPO, f"v{ver_xr}", xr_zip_name)
-    if not xr_zip.exists():
-        _download_and_verify_archive(url_xr, xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
-    else:
-        try:
-            verify_file_against_upstream(xr_zip, XRAY_REPO, f"v{ver_xr}", xr_zip_name)
-        except (SystemExit, Exception):
-            xr_zip.unlink(missing_ok=True)
-            raise
+    xr_zip, actual_ver_xr = _download_engine(
+        XRAY_REPO,
+        ver_xr,
+        "Xray-windows-64.zip",
+        target_bin_dir,
+        fallback_version=DEFAULT_XRAY_VERSION,
+    )
     _extract_binary(xr_exe, xr_zip)
 
-    manifest.write_text(json.dumps(want), encoding="utf-8")
+    actual_want = {"singbox": actual_ver_sb, "xray": actual_ver_xr}
+    manifest.write_text(json.dumps(actual_want), encoding="utf-8")
     return sb_exe, xr_exe
 
 

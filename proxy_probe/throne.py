@@ -70,8 +70,8 @@ def detect_throne_versions(throne_dir: Path) -> tuple[str, str]:
         try:
             out = subprocess.run([str(exe)], capture_output=True, timeout=10, cwd=str(throne_dir))
             txt = (out.stdout or b"").decode("utf-8", "replace")
-            m_sb = re.search(r"sing-box:\s*v?([\d.]+)", txt)
-            m_xr = re.search(r"Xray-core:\s*v?([\d.]+)", txt)
+            m_sb = re.search(r"sing-box:\s*v?([0-9a-zA-Z.-]+)", txt)
+            m_xr = re.search(r"Xray-core:\s*v?([0-9a-zA-Z.-]+)", txt)
             if m_sb and m_xr:
                 return m_sb.group(1), m_xr.group(1)
         except Exception:

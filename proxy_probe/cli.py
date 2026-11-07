@@ -395,6 +395,8 @@ def _collect_and_select_servers(
             s.state = str(rec.get("state", "ACTIVE" if res == "AGY-OK" else "DEAD"))
             s.consecutive_fails = int(rec.get("consecutive_fails", 0))
             s.web_status = str(rec.get("web_status", ""))
+            s.ingress_country_code = str(rec.get("ingress_country_code", ""))
+            s.ingress_ip = str(rec.get("ingress_ip", ""))
             cached_counts[res] = cached_counts.get(res, 0) + 1
             cached_unique_hosts.setdefault(res, set()).add(s.host_port)
         else:
@@ -546,6 +548,8 @@ def _execute_probe_pool(
             server.latency_ms = probe_res.get("latency_ms", 0)
             server.note = probe_res.get("note", "")
             server.web_status = probe_res.get("web_status", "")
+            server.ingress_country_code = probe_res.get("ingress_country_code", "")
+            server.ingress_ip = probe_res.get("ingress_ip", "")
         completed_count += 1
         engine_counts[server.result] += 1
         pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)

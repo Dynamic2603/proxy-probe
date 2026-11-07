@@ -13,6 +13,7 @@ from .models import (
     STATE_ACTIVE,
     STATE_DEAD,
     STATE_DEGRADED,
+    TERMINAL_FAILURES,
     Server,
 )
 
@@ -41,11 +42,20 @@ def resolve_lifecycle(
     consecutive_fails: int,
     probe_result: str,
 ) -> tuple[str, int, int]:
-    """Определяет (new_state, new_consecutive_fails, new_ok_count)."""
+    """Определяет (new_state, new_consecutive_fails, new_ok_count).
+
+    OCP: Терминальные сбои (AGY-BLOCK / геоблок Google) мгновенно переводят узел
+    в STATE_DEAD без испытательного срока.
+    Транзиентные сбои (DEAD / таймаут сети) сохраняют Grace Period (DEGRADED).
+    """
     if probe_result == RESULT_OK:
         return STATE_ACTIVE, 0, ok_count + 1
 
-    # Сбой (DEAD, AGY-BLOCK или ошибка)
+    # Терминальный сбой: геоблок — это свойство IP/подсети в Google, не деградирует
+    if probe_result in TERMINAL_FAILURES:
+        return STATE_DEAD, MAX_CONSECUTIVE_FAILS, 0
+
+    # Сетевой транзиентный сбой (DEAD / таймаут / connection reset)
     new_fails = consecutive_fails + 1
     if ok_count >= 1 and new_fails < MAX_CONSECUTIVE_FAILS:
         return STATE_DEGRADED, new_fails, ok_count
@@ -65,6 +75,15 @@ def _normalize_entry(rec: dict) -> dict:
     rec.setdefault("first_seen", rec.get("checked", ""))
     rec.setdefault("last_ok", rec.get("checked", "") if is_ok else "")
     rec.setdefault("web_status", "")
+    rec.setdefault("ingress_country_code", "")
+    rec.setdefault("ingress_ip", "")
+
+    # Ретроактивная нормализация: геоблоки никогда не могут быть в DEGRADED
+    if res in TERMINAL_FAILURES and rec.get("state") == STATE_DEGRADED:
+        rec["state"] = STATE_DEAD
+        rec["score"] = 0
+        rec["consecutive_fails"] = MAX_CONSECUTIVE_FAILS
+
     return rec
 
 
@@ -198,6 +217,8 @@ class ResultCache:
             "latency_ms": server.latency_ms,
             "note": server.note,
             "web_status": server.web_status or cur.get("web_status", ""),
+            "ingress_country_code": server.ingress_country_code or cur.get("ingress_country_code", ""),
+            "ingress_ip": server.ingress_ip or cur.get("ingress_ip", ""),
             "state": new_state,
             "score": new_score,
             "consecutive_fails": new_fails,
@@ -224,6 +245,10 @@ class ResultCache:
             rec["country_code"] = server.country_code
             rec["city"] = server.city
             rec["org"] = server.org
+            changed = True
+        if server.ingress_country_code and not rec.get("ingress_country_code"):
+            rec["ingress_country_code"] = server.ingress_country_code
+            rec["ingress_ip"] = server.ingress_ip
             changed = True
         return changed
 

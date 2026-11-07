@@ -7,7 +7,14 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import RESULT_OK, STATE_ACTIVE, STATE_DEGRADED, Server
+from .models import (
+    RESULT_OK,
+    STATE_ACTIVE,
+    STATE_DEGRADED,
+    Server,
+    format_score_display,
+    is_exportable,
+)
 from .stats import SummaryStats, compute_summary_stats
 
 if TYPE_CHECKING:
@@ -81,11 +88,7 @@ def write_report(
         )
         for idx, org in enumerate(ok_orgs, 1):
             c_str = ", ".join(org.countries) if org.countries else "-"
-            score_str = (
-                f"⭐{org.avg_score}"
-                if org.avg_score >= 90
-                else (str(org.avg_score) if org.avg_score > 0 else "—")
-            )
+            score_str = format_score_display(org.avg_score)
             lat_str = f"{org.avg_latency_ms} мс" if org.avg_latency_ms > 0 else "-"
             name_clean = org.org_name.replace("|", "\\|")
             lines.append(
@@ -107,7 +110,7 @@ def write_report(
         state_str = s.state or "—"
         if s.state == STATE_DEGRADED:
             state_str = f"DEGRADED ({s.consecutive_fails}/3)"
-        score_str = f"⭐{s.score}" if s.score >= 90 else (str(s.score) if s.score > 0 else "—")
+        score_str = format_score_display(s.score, s.state)
         lines.append(
             f"| {s.index} | {s.result or '—'} | {state_str} | {score_str} | {s.group_name} | {s.engine} | "
             f"{s.server}:{s.server_port} | {s.country} | {s.ip_out} | {s.latency_ms} | {name} | {note} |"
@@ -135,8 +138,7 @@ def write_import_file(
     # 1. Серверы активного пула в UI-порядке (s.index)
     if fallback_servers:
         for s in fallback_servers:
-            is_ok = (s.result == RESULT_OK or s.state == STATE_DEGRADED)
-            if is_ok and s.import_obj:
+            if s.is_exportable and s.import_obj:
                 ok_servers.append(s)
                 seen_keys.add(s.config_identity)
                 seen_keys.add(s.cache_key)
@@ -145,9 +147,9 @@ def write_import_file(
     # 2. Дополнительные валидные серверы из кэша, если они не были в активном пуле
     if cache is not None:
         for entry_key, entry in cache.entries.items():
-            state = entry.get("state")
-            res = entry.get("result")
-            if res != RESULT_OK and state != STATE_DEGRADED:
+            state = str(entry.get("state", ""))
+            res = str(entry.get("result", ""))
+            if not is_exportable(res, state):
                 continue
             if not cache.is_valid(entry_key):
                 continue
@@ -176,11 +178,14 @@ def write_import_file(
                 server_port=port,
                 import_obj=raw_obj,
                 source="cache",
+                result=res,
                 country=str(entry.get("country", "")),
                 ip_out=str(entry.get("ip_out", "")),
                 country_code=str(entry.get("country_code", "")),
                 city=str(entry.get("city", "")),
                 org=str(entry.get("org", "")),
+                ingress_country_code=str(entry.get("ingress_country_code", "")),
+                ingress_ip=str(entry.get("ingress_ip", "")),
                 score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
                 state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
                 consecutive_fails=int(entry.get("consecutive_fails", 0)),

@@ -262,15 +262,19 @@ def test_resolve_lifecycle() -> None:
     st, fails, oks = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_OK)
     assert st == STATE_ACTIVE and fails == 0 and oks == 1
 
-    # Первый сбой для ранее работавшего узла -> переходит в DEGRADED (1/3)
+    # Первый сбой по сети для ранее работавшего узла -> переходит в DEGRADED (1/3)
     st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=0, probe_result=RESULT_DEAD)
     assert st == STATE_DEGRADED and fails == 1 and oks == 1
 
-    # Второй сбой подряд -> остается в DEGRADED (2/3)
-    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=1, probe_result=RESULT_BLOCK)
+    # Второй сбой подряд по сети -> остается в DEGRADED (2/3)
+    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=1, probe_result=RESULT_DEAD)
     assert st == STATE_DEGRADED and fails == 2 and oks == 1
 
-    # Третий сбой подряд -> исчерпание лимита, переходит в DEAD (3/3)
+    # Геоблок (RESULT_BLOCK) -> терминальный сбой, СРАЗУ DEAD без Grace Period!
+    st, fails, oks = resolve_lifecycle(ok_count=5, consecutive_fails=0, probe_result=RESULT_BLOCK)
+    assert st == STATE_DEAD and fails == 3 and oks == 0
+
+    # Третий сбой подряд по сети -> исчерпание лимита, переходит в DEAD (3/3)
     st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_DEAD)
     assert st == STATE_DEAD and fails == 3 and oks == 1
 

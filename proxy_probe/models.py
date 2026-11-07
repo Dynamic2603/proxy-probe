@@ -21,6 +21,31 @@ STATE_DEGRADED = "DEGRADED"
 STATE_DEAD = "DEAD"
 MAX_CONSECUTIVE_FAILS = 3
 
+TERMINAL_FAILURES = {RESULT_BLOCK}
+TRANSIENT_FAILURES = {RESULT_DEAD, RESULT_UNKNOWN}
+
+
+def is_exportable(result: str, state: str) -> bool:
+    """SSOT-критерий доступности сервера для экспорта в proxy-ok.txt.
+
+    Сервер экспортируется, если:
+    1. Он подтвержден как рабочий для Gemini (result == AGY-OK).
+    2. Либо он на испытательном сроке по сети (state == STATE_DEGRADED),
+       НО строго при условии отсутствия геоблока (result != AGY-BLOCK).
+    """
+    if result in TERMINAL_FAILURES:
+        return False
+    return result == RESULT_OK or state == STATE_DEGRADED
+
+
+def format_score_display(score: int, state: str = STATE_ACTIVE) -> str:
+    """Форматирует скор для таблиц отчетов и консоли с суффиксом-эмодзи."""
+    if state == STATE_DEGRADED:
+        return f"{score}⚠️" if score > 0 else "—"
+    if score >= 90:
+        return f"{score}⭐"
+    return str(score) if score > 0 else "—"
+
 DEFAULT_TTLS = {RESULT_OK: 3 * 86400, RESULT_BLOCK: 7 * 86400, RESULT_DEAD: 86400}
 RESULT_PRIORITIES = {RESULT_BLOCK: 3, RESULT_OK: 2, RESULT_DEAD: 1, RESULT_UNKNOWN: 0}
 
@@ -129,11 +154,55 @@ class Server:
     state: str = STATE_ACTIVE
     consecutive_fails: int = 0
     web_status: str = ""
+    ingress_country_code: str = ""
+    ingress_ip: str = ""
     _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _sni: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _fingerprint: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _is_tcp_protocol: bool | None = dataclasses.field(default=None, repr=False, compare=False)
+
+    @property
+    def is_exportable(self) -> bool:
+        """SSOT-критерий: доступен ли узел для выгрузки в proxy-ok.txt."""
+        return is_exportable(self.result, self.state)
+
+    @property
+    def score_badge(self) -> str:
+        """Формирует бейдж скора и статуса с суффиксом-эмодзи (сохраняя алфавитную сортировку)."""
+        badge = ""
+        if self.state == STATE_ACTIVE:
+            badge = f"[{self.score}⭐]" if self.score >= 90 else (f"[{self.score}]" if self.score > 0 else "")
+        elif self.state == STATE_DEGRADED:
+            badge = f"[{self.score}⚠️]"
+
+        if self.web_status == WEB_STATUS_CAPTCHA:
+            badge = f"{badge}[captcha]" if badge else "[captcha]"
+        return badge
+
+    @property
+    def route_geo(self) -> str:
+        """Формирует географическую цепочку узла: '{in_flag} {in_code} ➔ {main_geo}' для реле."""
+        flag = country_code_to_emoji(self.country_code)
+        loc_parts: list[str] = []
+        if self.country_code:
+            loc_parts.append(self.country_code.upper())
+        if self.city:
+            loc_parts.append(self.city)
+        loc_str = ", ".join(loc_parts)
+
+        main_geo = f"{flag} {loc_str}".strip() if (flag or loc_str) else ""
+        if not main_geo and self.country:
+            main_geo = self.country
+
+        in_code = (self.ingress_country_code or "").strip().upper()
+        # Показываем маршрут ➔ только если точка входа отличается от точки выхода
+        if in_code and (self.server != self.ip_out):
+            in_flag = country_code_to_emoji(in_code)
+            in_str = f"{in_flag} {in_code}".strip()
+            return f"{in_str} ➔ {main_geo}" if main_geo else in_str
+
+        return main_geo
 
     @property
     def host_port(self) -> str:
@@ -200,26 +269,16 @@ class Server:
 
         Никогда не парсит и не использует сырые имена из подписок.
         Формат:
-        {flag} {code}, {city} | {clean_org} (sni: {sni}, fp: {fp})
+        [{score}⭐] [{flag_in} {code_in} ➔ ]{flag} {code}, {city} | {clean_org} (sni: {sni}, fp: {fp})
         Фоллбэк при неполном гео:
         {flag} {code} | {clean_org} -> {country} -> {host}:{port}
         """
-        flag = country_code_to_emoji(self.country_code)
-        loc_parts: list[str] = []
-        if self.country_code:
-            loc_parts.append(self.country_code.upper())
-        if self.city:
-            loc_parts.append(self.city)
-        loc_str = ", ".join(loc_parts)
-
-        main_geo = f"{flag} {loc_str}".strip() if (flag or loc_str) else ""
+        main_geo = self.route_geo
         org_str = normalize_org_name(self.org)
 
         parts: list[str] = []
         if main_geo:
             parts.append(main_geo)
-        elif self.country:
-            parts.append(self.country)
 
         if org_str:
             parts.append(org_str)
@@ -235,15 +294,7 @@ class Server:
         if extra_parts:
             head = f"{head} ({', '.join(extra_parts)})"
 
-        badge = ""
-        if self.state == STATE_ACTIVE:
-            badge = f"[⭐{self.score}]" if self.score >= 90 else (f"[{self.score}]" if self.score > 0 else "")
-        elif self.state == STATE_DEGRADED:
-            badge = f"[⚠️{self.score}]"
-
-        if self.web_status == WEB_STATUS_CAPTCHA:
-            badge = f"{badge}[captcha]" if badge else "[captcha]"
-
+        badge = self.score_badge
         if badge:
             head = f"{badge} {head}"
 

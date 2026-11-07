@@ -416,18 +416,32 @@ def test_formatted_tag_with_score_badges() -> None:
     s.state = STATE_ACTIVE
     assert s.formatted_tag == "[70] 🇩🇪 DE, Frankfurt | Hetzner"
 
-    # Топовый стабильный узел (score >= 90) -> [⭐95]
+    # Топовый стабильный узел (score >= 90) -> [95⭐] (эмодзи строго после числа для сохранения сортировки)
     s.score = 95
     s.state = STATE_ACTIVE
-    assert s.formatted_tag == "[⭐95] 🇩🇪 DE, Frankfurt | Hetzner"
+    assert s.formatted_tag == "[95⭐] 🇩🇪 DE, Frankfurt | Hetzner"
 
-    # Узел на испытательном сроке -> [⚠️40]
+    # Узел на испытательном сроке -> [40⚠️]
     s.score = 40
     s.state = STATE_DEGRADED
-    assert s.formatted_tag == "[⚠️40] 🇩🇪 DE, Frankfurt | Hetzner"
+    assert s.formatted_tag == "[40⚠️] 🇩🇪 DE, Frankfurt | Hetzner"
 
     # Узел с веб-капчей -> добавляется бейдж [captcha]
     s.score = 70
     s.state = STATE_ACTIVE
     s.web_status = "captcha"
     assert s.formatted_tag == "[70][captcha] 🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Реле: точка входа (RU) отличается от точки выхода (DE)
+    s.score = 95
+    s.state = STATE_ACTIVE
+    s.web_status = ""
+    s.server = "94.183.197.2"
+    s.ip_out = "203.23.178.223"
+    s.ingress_country_code = "RU"
+    assert s.formatted_tag == "[95⭐] 🇷🇺 RU ➔ 🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Прямой сервер: точка входа совпадает с точкой выхода (нет стрелки)
+    s.server = "203.23.178.223"
+    s.ip_out = "203.23.178.223"
+    assert s.formatted_tag == "[95⭐] 🇩🇪 DE, Frankfurt | Hetzner"

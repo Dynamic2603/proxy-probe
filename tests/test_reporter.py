@@ -323,5 +323,29 @@ def test_write_report_includes_org_ranking(tmp_path: Path) -> None:
     assert "## Рейтинг хостинг-провайдеров (Дата-центры / ISP)" in content
     assert "Hetzner Online GmbH" in content
     assert "DigitalOcean, LLC" in content
-    assert "| 1 | Hetzner Online GmbH | 1 | 1 | 65 мс | ⭐95 | DE |" in content
+    assert "| 1 | Hetzner Online GmbH | 1 | 1 | 65 мс | 95⭐ | DE |" in content
+
+
+def test_write_import_file_never_exports_agy_block(tmp_path: Path) -> None:
+    from proxy_probe.models import RESULT_BLOCK, STATE_DEGRADED
+
+    import_file = tmp_path / "test-block.txt"
+    s_block = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s_block",
+        engine="sing-box",
+        server="5.5.5.5",
+        server_port=443,
+        import_obj={"type": "vless", "server": "5.5.5.5", "server_port": 443},
+        source="fresh",
+        result=RESULT_BLOCK,
+        score=25,
+        state=STATE_DEGRADED,  # Даже если бы старая запись имела DEGRADED
+        consecutive_fails=1,
+        latency_ms=200,
+    )
+    sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_block])
+    assert sb_cnt == 0
+    assert xr_cnt == 0
 

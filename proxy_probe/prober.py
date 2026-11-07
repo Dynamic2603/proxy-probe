@@ -413,6 +413,55 @@ def fetch_geo_for_ip(ip: str, timeout: float = 4.0) -> tuple[str, str, str, str,
         return "", "", "", "", ""
 
 
+_INGRESS_GEO_CACHE: dict[str, tuple[str, str]] = {}
+_INGRESS_GEO_LOCK = threading.Lock()
+
+
+def resolve_host_ip(host: str) -> str:
+    """Резолвит доменное имя в IPv4-адрес. Если host уже IP, возвращает его."""
+    h = (host or "").strip()
+    if not h:
+        return ""
+    try:
+        socket.inet_aton(h)
+        return h
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(h)
+    except Exception:
+        return ""
+
+
+def resolve_ingress_country(host: str, timeout: float = 3.0) -> tuple[str, str]:
+    """Возвращает (country_code, resolved_ip) для точки входа с потокобезопасной мемоизацией."""
+    h = (host or "").strip()
+    if not h:
+        return "", ""
+    with _INGRESS_GEO_LOCK:
+        if h in _INGRESS_GEO_CACHE:
+            return _INGRESS_GEO_CACHE[h]
+
+    ip = resolve_host_ip(h)
+    if not ip or ip.startswith("127.") or ip == "localhost":
+        with _INGRESS_GEO_LOCK:
+            _INGRESS_GEO_CACHE[h] = ("", ip)
+        return "", ip
+
+    with _INGRESS_GEO_LOCK:
+        if ip in _INGRESS_GEO_CACHE:
+            res = _INGRESS_GEO_CACHE[ip]
+            _INGRESS_GEO_CACHE[h] = res
+            return res
+
+    _, _, code, _, _ = fetch_geo_for_ip(ip, timeout=timeout)
+    code = (code or "").strip().upper()
+    with _INGRESS_GEO_LOCK:
+        _INGRESS_GEO_CACHE[h] = (code, ip)
+        _INGRESS_GEO_CACHE[ip] = (code, ip)
+    return code, ip
+
+
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str, str, str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
@@ -857,6 +906,19 @@ def run_probe(
             if w_status == WEB_STATUS_CAPTCHA:
                 note = f"{note} [captcha]".strip() if note else "captcha (google.com/sorry)"
 
+        ingress_country_code = ""
+        ingress_ip = ""
+        server_host = str(import_obj.get("server") or "").strip()
+        if not server_host:
+            sett = import_obj.get("settings")
+            if isinstance(sett, dict):
+                vnext = sett.get("vnext")
+                if isinstance(vnext, list) and vnext and isinstance(vnext[0], dict):
+                    server_host = str(vnext[0].get("address") or "").strip()
+
+        if server_host and ip_out and server_host != ip_out:
+            ingress_country_code, ingress_ip = resolve_ingress_country(server_host, timeout=3.0)
+
         return {
             "result": result,
             "country": country,
@@ -867,6 +929,8 @@ def run_probe(
             "latency_ms": latency,
             "note": note,
             "web_status": web_status,
+            "ingress_country_code": ingress_country_code,
+            "ingress_ip": ingress_ip,
         }
     finally:
         if proc is not None:

@@ -23,8 +23,34 @@ from .models import (
     RESULT_OK,
     RESULT_UNKNOWN,
     UNKNOWN_PATTERNS,
+    QuotaInfo,
+    parse_quota_info,
 )
 from .parsers import USER_AGENT
+
+
+class QuotaCircuitBreaker:
+    """Потокобезопасный автомат аварийного отключения при исчерпании глобальной квоты."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._reason: str = ""
+
+    def trip(self, reason: str = "") -> None:
+        with self._lock:
+            if not self._event.is_set():
+                self._reason = reason or "квота agy исчерпана"
+                self._event.set()
+
+    @property
+    def is_tripped(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def reason(self) -> str:
+        with self._lock:
+            return self._reason
 
 
 class ProcessRegistry:
@@ -80,6 +106,95 @@ def get_default_agy_bin() -> str:
     return find_agy_bin()
 
 
+FLASH_PREFERENCE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"flash.*low", re.IGNORECASE),
+    re.compile(r"flash.*medium", re.IGNORECASE),
+    re.compile(r"flash", re.IGNORECASE),
+]
+
+
+def resolve_lightest_flash_model(model_names: list[str]) -> str | None:
+    """Выбирает наиболее экономичную Flash-модель из списка доступных.
+
+    Приоритет:
+    1. Модели с маркером flash.*low (например, gemini-3.8-flash-low)
+    2. Модели с маркером flash.*medium (например, gemini-3.8-flash-medium)
+    3. Любая модель с маркером flash
+    """
+    for pat in FLASH_PREFERENCE_PATTERNS:
+        for name in model_names:
+            if pat.search(name):
+                return name
+    return None
+
+
+@cache
+def detect_best_agy_model(agy_bin: str) -> str | None:
+    """Определяет наилучшую легковесную модель через 'agy models'."""
+    env_model = os.environ.get("AGY_MODEL")
+    if env_model:
+        return env_model.strip()
+
+    try:
+        proc = subprocess.run(
+            [agy_bin, "models"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            names: list[str] = []
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line or line.lower().startswith("fetching"):
+                    continue
+                parts = line.split()
+                if parts:
+                    names.append(parts[0])
+            matched = resolve_lightest_flash_model(names)
+            if matched:
+                return matched
+    except Exception:
+        pass
+    return None
+
+
+def check_agy_health(
+    agy_bin: str,
+    model: str | None = None,
+    timeout: float = 15.0,
+) -> tuple[bool, QuotaInfo]:
+    """Быстрая проверка доступности квоты agy перед запуском пула."""
+    cmd = [
+        agy_bin,
+        "-p",
+        AGY_PROMPT,
+        "--print-timeout",
+        "10s",
+        "--disable-slash-commands",
+        "--output-format",
+        "text",
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
+        quota_info = parse_quota_info(combined)
+        if quota_info.is_exhausted:
+            return False, quota_info
+        return True, quota_info
+    except Exception:
+        return True, QuotaInfo(is_exhausted=False)
+
+
 AGY_PROMPT = "Reply with only the word OK"
 AGY_PRINT_TIMEOUT_DEFAULT = "45s"
 GEO_URL = "http://ipwho.is/"
@@ -111,6 +226,7 @@ def agy_probe(
     agy_bin: str,
     print_timeout: str,
     total_timeout: float,
+    model: str | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
 ) -> tuple[str, int]:
@@ -132,6 +248,8 @@ def agy_probe(
         "--output-format",
         "text",
     ]
+    if model:
+        cmd.extend(["--model", model])
     with tempfile.TemporaryDirectory(prefix="pxp_probe_", ignore_cleanup_errors=True) as cwd:
         try:
             proc = subprocess.Popen(
@@ -217,6 +335,9 @@ def run_probe(
     timeouts: dict[str, float],
     agy_bin: str | None = None,
     print_timeout: str = AGY_PRINT_TIMEOUT_DEFAULT,
+    agy_model: str | None = None,
+    agy_semaphore: threading.Semaphore | None = None,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
 ) -> dict[str, Any]:
@@ -330,15 +451,38 @@ def run_probe(
 
         # Geo-данные уже можно получить — туннель жив
         country, ip_out = fetch_geo(port, timeouts.get("geo", 8.0))
+
+        if circuit_breaker is not None and circuit_breaker.is_tripped:
+            return {
+                "result": RESULT_UNKNOWN,
+                "country": country,
+                "ip_out": ip_out,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "note": "пропущено (квота agy исчерпана)",
+            }
+
         try:
-            atext, arc = agy_probe(
-                port,
-                resolved_agy_bin,
-                print_timeout,
-                timeouts.get("probe", 45.0),
-                stop_event=stop_event,
-                registry=registry,
-            )
+            if agy_semaphore is not None:
+                with agy_semaphore:
+                    atext, arc = agy_probe(
+                        port,
+                        resolved_agy_bin,
+                        print_timeout,
+                        timeouts.get("probe", 45.0),
+                        model=agy_model,
+                        stop_event=stop_event,
+                        registry=registry,
+                    )
+            else:
+                atext, arc = agy_probe(
+                    port,
+                    resolved_agy_bin,
+                    print_timeout,
+                    timeouts.get("probe", 45.0),
+                    model=agy_model,
+                    stop_event=stop_event,
+                    registry=registry,
+                )
         except Exception as e:
             return {
                 "result": RESULT_DEAD,
@@ -358,24 +502,32 @@ def run_probe(
             }
 
         latency = int((time.time() - t0) * 1000)
-        result = classify_agy(atext or "", arc)
 
-        # Если agy таймаутнул (rc == -1), но preflight прошёл — туннель жив,
-        # проблема в agy/API, а не в прокси → UNKNOWN, не DEAD
-        if arc == -1 and result == RESULT_DEAD:
+        quota_info = parse_quota_info(atext or "")
+        if quota_info.is_exhausted:
+            if circuit_breaker is not None:
+                circuit_breaker.trip(quota_info.clean_note)
             result = RESULT_UNKNOWN
-
-        raw_text = " ".join((atext or "").strip().split())
-        if arc == -1:
-            note = f"таймаут agy ({timeouts.get('probe', 45.0):.0f}с)"
-        elif arc == -2:
-            note = f"ошибка запуска agy: {raw_text}"
-        elif raw_text:
-            note = raw_text[:250]
-        elif arc != 0:
-            note = f"rc={arc} (нет вывода)"
+            note = quota_info.clean_note
         else:
-            note = ""
+            result = classify_agy(atext or "", arc)
+
+            # Если agy таймаутнул (rc == -1), но preflight прошёл — туннель жив,
+            # проблема в agy/API, а не в прокси → UNKNOWN, не DEAD
+            if arc == -1 and result == RESULT_DEAD:
+                result = RESULT_UNKNOWN
+
+            raw_text = " ".join((atext or "").strip().split())
+            if arc == -1:
+                note = f"таймаут agy ({timeouts.get('probe', 45.0):.0f}с)"
+            elif arc == -2:
+                note = f"ошибка запуска agy: {raw_text}"
+            elif raw_text:
+                note = raw_text[:250]
+            elif arc != 0:
+                note = f"rc={arc} (нет вывода)"
+            else:
+                note = ""
 
         return {
             "result": result,

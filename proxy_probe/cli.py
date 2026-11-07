@@ -33,7 +33,15 @@ from .orchestrator import (
     run_dir,
 )
 from .parsers import parse_subscription
-from .prober import AGY_PRINT_TIMEOUT_DEFAULT, ProcessRegistry, get_default_agy_bin, run_probe
+from .prober import (
+    AGY_PRINT_TIMEOUT_DEFAULT,
+    ProcessRegistry,
+    QuotaCircuitBreaker,
+    check_agy_health,
+    detect_best_agy_model,
+    get_default_agy_bin,
+    run_probe,
+)
 from .reporter import write_import_file, write_report
 from .throne import (
     default_throne_dir,
@@ -74,6 +82,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="путь к agy.exe (CLI Antigravity, по умолчанию поиск в PATH и AppData)",
+    )
+    ap.add_argument(
+        "--agy-model",
+        type=str,
+        default=None,
+        help="модель для agy (по умолчанию автоопределение легчайшей Flash-модели через 'agy models')",
+    )
+    ap.add_argument(
+        "--agy-concurrency",
+        type=int,
+        default=2,
+        help="максимальное число одновременных процессов agy (по умолчанию 2)",
+    )
+    ap.add_argument(
+        "--skip-precheck",
+        action="store_true",
+        help="пропустить предстартовую проверку доступности квоты agy",
     )
     ap.add_argument(
         "--print-timeout", type=str, default=AGY_PRINT_TIMEOUT_DEFAULT, help="--print-timeout для agy (например 45s)"
@@ -124,6 +149,9 @@ def _resolve_agy_bin(args_agy_bin: str | None) -> str:
 @dataclasses.dataclass
 class RuntimeContext:
     agy_bin: str
+    agy_model: str | None
+    agy_concurrency: int
+    initial_circuit_breaker: QuotaCircuitBreaker | None
     cache: ResultCache | None
     cache_path: Path
     ttl_map: dict[str, int]
@@ -138,6 +166,33 @@ class RuntimeContext:
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     agy_bin = _resolve_agy_bin(args.agy_bin)
     print(f"Пробер agy: {agy_bin}")
+
+    agy_model = args.agy_model or detect_best_agy_model(agy_bin)
+    if agy_model:
+        print(f"Модель agy: {agy_model}")
+
+    initial_cb: QuotaCircuitBreaker | None = None
+    if not args.skip_precheck:
+        health_ok, quota_info = check_agy_health(agy_bin, model=agy_model)
+        if not health_ok:
+            initial_cb = QuotaCircuitBreaker()
+            initial_cb.trip(quota_info.clean_note)
+            console.print(
+                f"\n[bold yellow]⚠️ Внимание: квота agy исчерпана ({quota_info.clean_note})![/bold yellow]"
+            )
+            if not args.no_pause and sys.stdin and sys.stdin.isatty():
+                prompt_text = "Продолжить проверку узлов в режиме preflight/geo (без agy) [y/N]? "
+                try:
+                    ans = input(prompt_text).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    ans = ""
+                if ans not in ("y", "yes", "д", "да"):
+                    console.print("[dim]Проверка отменена пользователем.[/dim]")
+                    sys.exit(0)
+            else:
+                console.print(
+                    "[dim]Проверка будет выполнена в режиме preflight/geo (без обращений к agy).[/dim]"
+                )
 
     cache_path = Path(args.cache) if args.cache else default_cache_path()
     ttl_map = {"AGY-OK": args.ttl_ok, "AGY-BLOCK": args.ttl_blocked, "DEAD": args.ttl_dead}
@@ -160,6 +215,9 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
 
     return RuntimeContext(
         agy_bin=agy_bin,
+        agy_model=agy_model,
+        agy_concurrency=args.agy_concurrency,
+        initial_circuit_breaker=initial_cb,
         cache=cache,
         cache_path=cache_path,
         ttl_map=ttl_map,
@@ -249,6 +307,9 @@ def _probe_worker(
     timeouts: dict[str, float],
     agy_bin: str,
     print_timeout: str,
+    agy_model: str | None = None,
+    agy_semaphore: threading.Semaphore | None = None,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
 ) -> dict[str, Any]:
@@ -270,6 +331,9 @@ def _probe_worker(
         timeouts,
         agy_bin=agy_bin,
         print_timeout=print_timeout,
+        agy_model=agy_model,
+        agy_semaphore=agy_semaphore,
+        circuit_breaker=circuit_breaker,
         stop_event=stop_event,
         registry=registry,
     )
@@ -282,7 +346,9 @@ def _execute_probe_pool(
     ctx: RuntimeContext,
     print_timeout: str,
     cached_counts: dict[str, int] | None = None,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
 ) -> tuple[int, bool]:
+    cb = circuit_breaker or getattr(ctx, "initial_circuit_breaker", None) or QuotaCircuitBreaker()
     if not to_probe:
         return 0, False
 
@@ -294,6 +360,9 @@ def _execute_probe_pool(
     run_root = run_dir()
     registry = ProcessRegistry()
     stop_event = threading.Event()
+    concurrency = getattr(ctx, "agy_concurrency", 2)
+    agy_semaphore = threading.Semaphore(concurrency)
+    model = getattr(ctx, "agy_model", None)
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
     futures: dict[concurrent.futures.Future[Any], Server] = {}
     completed_count = 0
@@ -310,6 +379,9 @@ def _execute_probe_pool(
             timeouts,
             ctx.agy_bin,
             print_timeout,
+            agy_model=model,
+            agy_semaphore=agy_semaphore,
+            circuit_breaker=cb,
             stop_event=stop_event,
             registry=registry,
         )
@@ -382,10 +454,18 @@ def _finalize_and_report(
     dt: float,
     cached_counts: dict[str, int],
     interrupted: bool = False,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
 ) -> None:
     if interrupted:
         warnings = list(warnings)
         warnings.append("Проверка была прервана пользователем (Ctrl+C). Часть серверов не проверена.")
+
+    if circuit_breaker and circuit_breaker.is_tripped:
+        warnings = list(warnings)
+        warnings.append(
+            f"Во время проверки была исчерпана индивидуальная квота agy ({circuit_breaker.reason}). "
+            f"Последующие проверки agy пропущены, серверы протестированы по preflight/geo."
+        )
 
     if ctx.cache:
         for s in servers:
@@ -458,6 +538,7 @@ def main() -> None:
         print_timeout = f"{int(args.timeout)}s"
     t0 = time.time()
 
+    circuit_breaker = ctx.initial_circuit_breaker or QuotaCircuitBreaker()
     _completed_count, interrupted = _execute_probe_pool(
         to_probe=to_probe,
         jobs=args.jobs,
@@ -465,6 +546,7 @@ def main() -> None:
         ctx=ctx,
         print_timeout=print_timeout,
         cached_counts=cached_counts,
+        circuit_breaker=circuit_breaker,
     )
     dt = time.time() - t0
 
@@ -476,6 +558,7 @@ def main() -> None:
         dt=dt,
         cached_counts=cached_counts,
         interrupted=interrupted,
+        circuit_breaker=circuit_breaker,
     )
 
     if interrupted:

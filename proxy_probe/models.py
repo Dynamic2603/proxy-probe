@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 from typing import Any
 
 RESULT_OK = "AGY-OK"
@@ -46,6 +47,37 @@ UNKNOWN_PATTERNS = [
     "UNAUTHENTICATED",
     "token expired",
 ]
+
+QUOTA_EXHAUSTED_MARKERS: list[str] = [
+    "individual quota reached",
+]
+
+_RE_RESETS_IN = re.compile(r"Resets in\s+([0-9a-zA-Z]+)", re.IGNORECASE)
+
+
+@dataclasses.dataclass(frozen=True)
+class QuotaInfo:
+    is_exhausted: bool
+    reset_after: str = ""
+
+    @property
+    def clean_note(self) -> str:
+        if not self.is_exhausted:
+            return ""
+        if self.reset_after:
+            return f"лимит квоты agy (сброс через {self.reset_after})"
+        return "лимит квоты agy"
+
+
+def parse_quota_info(text: str) -> QuotaInfo:
+    if not text:
+        return QuotaInfo(is_exhausted=False)
+    lower = text.lower()
+    is_exhausted = any(m.lower() in lower for m in QUOTA_EXHAUSTED_MARKERS)
+    reset_after = ""
+    if m := _RE_RESETS_IN.search(text):
+        reset_after = m.group(1).strip()
+    return QuotaInfo(is_exhausted=is_exhausted, reset_after=reset_after)
 
 
 @dataclasses.dataclass

@@ -16,4 +16,10 @@
 3. **Целевой API и гео**:
    - `https://generativelanguage.googleapis.com/v1beta/...` — Gemini API (маркер гео-блока: `User location is not supported`).
    - `https://ipwho.is/` — гео-определение egress-IP для отчёта.
+4. **Защита от исчерпания квот agy / Gemini**:
+   - Автоматический выбор легковесной Flash-модели через `detect_best_agy_model` (приоритет: `flash.*low` -> `flash.*medium` -> `flash`; переопределение через `--agy-model` / `AGY_MODEL`).
+   - Семафор ограничения параллелизма к `agy` (`--agy-concurrency`, по умолчанию 2 процесса).
+   - Автомат аварийного отключения `QuotaCircuitBreaker`: при ошибке `individual quota reached` вызовы `agy` мгновенно отключаются для последующих серверов, сохраняя только сетевой preflight/geo; статус `UNKNOWN` исключён из кэширования в `results.json`.
+   - Предстартовая проверка `check_agy_health` предупреждает об исчерпании квоты до запуска тестирования пула.
+
 

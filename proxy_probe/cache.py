@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from pathlib import Path
+from typing import Any
 
 from .models import (
     DEFAULT_TTLS,
@@ -81,25 +82,40 @@ class ResultCache:
         self.path = Path(path) if path else default_cache_path()
         self.ttl_map = ttl_map or dict(DEFAULT_TTLS)
         self.entries: dict[str, dict] = {}
+        self.meta: dict[str, Any] = {}
         self.load()
+
+    def get_meta(self, key: str, default: Any = None) -> Any:
+        return self.meta.get(key, default)
+
+    def set_meta(self, key: str, value: Any) -> None:
+        self.meta[key] = value
 
     def load(self) -> None:
         if not self.path.exists():
             self.entries = {}
+            self.meta = {}
             return
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            servers = data.get("servers") if isinstance(data, dict) else None
-            if isinstance(servers, dict):
-                self.entries = {
-                    k: _normalize_entry(v)
-                    for k, v in servers.items()
-                    if isinstance(k, str) and isinstance(v, dict)
-                }
+            if isinstance(data, dict):
+                raw_meta = data.get("meta")
+                self.meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+                servers = data.get("servers")
+                if isinstance(servers, dict):
+                    self.entries = {
+                        k: _normalize_entry(v)
+                        for k, v in servers.items()
+                        if isinstance(k, str) and isinstance(v, dict)
+                    }
+                else:
+                    self.entries = {}
             else:
                 self.entries = {}
+                self.meta = {}
         except Exception:
             self.entries = {}
+            self.meta = {}
 
     def get_valid(self, server_key: str, now: _dt.datetime | None = None) -> dict | None:
         rec = self.entries.get(server_key)
@@ -241,6 +257,6 @@ class ResultCache:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        payload = {"version": CACHE_VERSION, "servers": self.entries}
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        payload = {"version": CACHE_VERSION, "meta": self.meta, "servers": self.entries}
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         tmp.replace(self.path)

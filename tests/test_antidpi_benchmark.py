@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from proxy_probe.antidpi.benchmark import (
+    apply_relay_detour,
     build_relay_detour,
     calculate_strategy_score,
     format_benchmark_table,
     load_ratings,
+    probe_proxy_tunnel,
     save_ratings,
     select_dead_servers,
 )
@@ -59,11 +61,35 @@ def test_build_relay_detour() -> None:
     assert sb_out["type"] == "socks"
     assert sb_out["server_port"] == 10850
 
-    # Xray
+    # Xray (modern Xray 26+ dialerProxy)
     xr_detour, xr_out = build_relay_detour(is_xray=True, relay_port=10850)
-    assert xr_detour == {"proxySettings": {"tag": "zapret-relay"}}
+    assert xr_detour == {"streamSettings": {"sockopt": {"dialerProxy": "zapret-relay"}}}
     assert xr_out["protocol"] == "socks"
     assert xr_out["settings"]["servers"][0]["port"] == 10850
+
+
+def test_apply_relay_detour() -> None:
+    # sing-box
+    sb_obj = {"type": "vless", "server": "1.2.3.4"}
+    patched_sb = apply_relay_detour(sb_obj, is_xray=False)
+    assert patched_sb["detour"] == "zapret-relay"
+
+    # Xray with existing streamSettings (preserves existing properties)
+    xr_obj = {
+        "protocol": "vless",
+        "streamSettings": {"security": "reality", "realitySettings": {"serverName": "test.com"}},
+    }
+    patched_xr = apply_relay_detour(xr_obj, is_xray=True)
+    assert patched_xr["streamSettings"]["sockopt"]["dialerProxy"] == "zapret-relay"
+    assert patched_xr["streamSettings"]["realitySettings"]["serverName"] == "test.com"
+
+
+def test_probe_proxy_tunnel_invalid() -> None:
+    srv = make_srv("127.0.0.1", RESULT_DEAD)
+    srv.import_obj = {}
+    ok, lat = probe_proxy_tunnel(srv)
+    assert not ok
+    assert lat == 0
 
 
 def test_save_and_load_ratings(tmp_path: Path) -> None:

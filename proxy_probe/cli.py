@@ -681,7 +681,7 @@ def _execute_antidpi_stage(
     if not ctx.antidpi:
         return 0
 
-    from .antidpi.benchmark import build_relay_detour, load_ratings
+    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings
     from .antidpi.catalogue import get_golden_strategies, get_strategy_by_number
     from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
     from .antidpi.relay import ZapretRelay
@@ -695,6 +695,8 @@ def _execute_antidpi_stage(
     target_ips = {s.server for s in dead_candidates if s.server}
     if not target_ips:
         return 0
+
+    ports_str = ",".join(sorted({str(s.server_port) for s in dead_candidates if s.server_port})) or "443"
 
     strat_num = ctx.antidpi_strategy
     if strat_num is None:
@@ -733,7 +735,12 @@ def _execute_antidpi_stage(
     try:
         with (
             ZapretRelay(port=relay_port),
-            WinwsRunner(strategy=strat, target_ips=target_ips, zapret_dir=zapret_dir),
+            WinwsRunner(
+                strategy=strat,
+                target_ips=target_ips,
+                zapret_dir=zapret_dir,
+                ports=ports_str,
+            ),
         ):
             concurrency = getattr(ctx, "agy_concurrency", 2)
             agy_semaphore = threading.Semaphore(concurrency)
@@ -744,12 +751,11 @@ def _execute_antidpi_stage(
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(dead_candidates), 4)) as ex:
                 futures = {}
                 for s in dead_candidates:
-                    detour_patch, relay_outbound = build_relay_detour(
+                    patched_obj = apply_relay_detour(s.import_obj, is_xray=(s.engine == "xray"))
+                    _, relay_outbound = build_relay_detour(
                         is_xray=(s.engine == "xray"),
                         relay_port=relay_port,
                     )
-                    patched_obj = dict(s.import_obj)
-                    patched_obj.update(detour_patch)
                     bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
                     fut = ex.submit(
                         _probe_worker,

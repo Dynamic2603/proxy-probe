@@ -3,8 +3,10 @@ from __future__ import annotations
 import atexit
 import contextlib
 import hashlib
+import ipaddress
 import logging
 import shutil
+import socket
 import subprocess
 import time
 import urllib.request
@@ -94,13 +96,34 @@ def ensure_zapret_binaries(
     return target_dir
 
 
+def resolve_ip(target: str) -> str | None:
+    """Нормализует целевой хост в IPv4 адрес для WinDivert."""
+    target = target.strip()
+    if not target:
+        return None
+    try:
+        ipaddress.ip_address(target)
+        return target
+    except ValueError:
+        try:
+            return socket.gethostbyname(target)
+        except Exception:
+            return None
+
+
 def build_windivert_filter(target_ips: set[str] | list[str]) -> str:
     """Формирует строгий WinDivert raw-фильтр только по целевым IP адресам (SSOT/Безопасность).
 
     Гарантирует 100% изоляцию: если список IP пуст, выбрасывает исключение во избежание
     случайного глобального перехвата системного трафика.
     """
-    cleaned = sorted({str(ip).strip() for ip in target_ips if str(ip).strip()})
+    resolved: set[str] = set()
+    for item in target_ips:
+        ip = resolve_ip(str(item))
+        if ip:
+            resolved.add(ip)
+
+    cleaned = sorted(resolved)
     if not cleaned:
         raise ValueError("Список целевых IP пуст. Глобальный перехват трафика запрещен!")
 

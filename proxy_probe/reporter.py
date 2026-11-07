@@ -228,7 +228,9 @@ def write_import_file(
         is_xray = s.engine == "xray" or (not s.engine and s.import_obj.get("protocol"))
         if s.antidpi_strategy is not None:
             if is_xray:
-                prepared["proxySettings"] = {"tag": "zapret-relay"}
+                ss = prepared.setdefault("streamSettings", {})
+                sockopt = ss.setdefault("sockopt", {})
+                sockopt["dialerProxy"] = "zapret-relay"
                 has_zapret_xr = True
             else:
                 prepared["detour"] = "zapret-relay"

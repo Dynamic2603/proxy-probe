@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as _dt
 import logging
-import socket
 import sys
 import time
 
 from ..cache import ResultCache, default_cache_path
+from ..parsers import extract_host_port
 from .benchmark import (
+    calculate_strategy_score,
     default_ratings_path,
     format_benchmark_table,
     load_ratings,
+    probe_proxy_tunnel,
     save_ratings,
     select_dead_servers,
 )
@@ -54,19 +57,22 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         raw_obj = entry.get("import_obj")
         if not isinstance(raw_obj, dict):
             continue
-        host = str(raw_obj.get("server") or "")
-        port = int(raw_obj.get("server_port") or 0)
+        host, port = extract_host_port(raw_obj)
+        if not host or not port:
+            continue
+        engine = str(entry.get("engine") or ("xray" if "protocol" in raw_obj else "sing-box"))
         s = Server(
             group_id=0,
             group_name="",
             name=str(raw_obj.get("tag", "")),
-            engine=str(entry.get("engine") or "sing-box"),
+            engine=engine,
             server=host,
             server_port=port,
             import_obj=raw_obj,
             source="cache",
             result=res,
             state=state,
+            note=str(entry.get("note") or ""),
         )
         dead_candidates.append(s)
 
@@ -88,6 +94,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     zapret_dir = ensure_zapret_binaries()
 
     target_ips = [s.server for s in selected if s.server]
+    ports_str = ",".join(sorted({str(s.server_port) for s in selected if s.server_port})) or "443"
     ratings: list[StrategyRating] = []
 
     # Запускаем локальный релей
@@ -96,42 +103,33 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         for idx, strat in enumerate(test_strategies, 1):
             print(f"[{idx}/{len(test_strategies)}] Тестирование S{strat.number:02d}: {strat.name[:45]}...")
             try:
-                with WinwsRunner(strategy=strat, target_ips=target_ips, zapret_dir=zapret_dir):
+                with WinwsRunner(
+                    strategy=strat,
+                    target_ips=target_ips,
+                    zapret_dir=zapret_dir,
+                    ports=ports_str,
+                ):
                     time.sleep(0.3)
-                    # Быстрый тест сокета через релей
                     rescued = 0
                     latencies: list[int] = []
-                    for srv in selected:
-                        t0 = time.time()
-                        try:
-                            # Проверяем TCP connect через наш SOCKS5 релей
-                            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                                sock.settimeout(2.5)
-                                sock.connect((DEFAULT_RELAY_HOST, relay_port))
-                                # SOCKS5 handshake
-                                sock.sendall(b"\x05\x01\x00")
-                                if sock.recv(2) != b"\x05\x00":
-                                    continue
-                                # SOCKS5 connect to destination
-                                host_bytes = srv.server.encode("utf-8")
-                                req = (
-                                    b"\x05\x01\x00\x03"
-                                    + bytes([len(host_bytes)])
-                                    + host_bytes
-                                    + srv.server_port.to_bytes(2, "big")
-                                )
-                                sock.sendall(req)
-                                resp = sock.recv(10)
-                                if len(resp) >= 4 and resp[1] == 0x00:
-                                    dt_ms = int((time.time() - t0) * 1000)
+                    workers = min(len(selected), 5)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                        futs = {
+                            ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=2.5): srv
+                            for srv in selected
+                        }
+                        for fut in concurrent.futures.as_completed(futs):
+                            try:
+                                ok, lat_ms = fut.result()
+                                if ok:
                                     rescued += 1
-                                    latencies.append(dt_ms)
-                        except Exception:
-                            pass
+                                    latencies.append(lat_ms)
+                            except Exception:
+                                pass
 
                     avg_lat = int(sum(latencies) / len(latencies)) if latencies else 0
                     rate = rescued / len(selected) if selected else 0
-                    score = int(rate * 80) + max(0, 20 - (avg_lat // 15)) if rescued > 0 else 0
+                    score = calculate_strategy_score(rescued, len(selected), avg_lat)
                     r = StrategyRating(
                         strategy_number=strat.number,
                         strategy_name=strat.name,

@@ -861,6 +861,24 @@ def _execute_antidpi_stage(
     return rescued_count
 
 
+def _sync_and_save_cache(
+    ctx: RuntimeContext,
+    servers: list[Server],
+    to_probe: list[Server],
+    label: str = "",
+) -> None:
+    if not ctx.cache:
+        return
+    for s in servers:
+        ctx.cache.enrich_from_server(s)
+    for s in to_probe:
+        if s.result:
+            ctx.cache.update_from_server(s)
+    ctx.cache.save()
+    suffix = f" ({label})" if label else ""
+    console.print(f"[dim]Кэш сохранён{suffix}: {ctx.cache_path} (записей: {len(ctx.cache.entries)})[/dim]")
+
+
 def _finalize_and_report(
     ctx: RuntimeContext,
     servers: list[Server],
@@ -883,14 +901,7 @@ def _finalize_and_report(
             f"Последующие проверки agy пропущены, серверы протестированы по preflight/geo."
         )
 
-    if ctx.cache:
-        for s in servers:
-            ctx.cache.enrich_from_server(s)
-        for s in to_probe:
-            if s.result:
-                ctx.cache.update_from_server(s)
-        ctx.cache.save()
-        console.print(f"[dim]Кэш обновлён: {ctx.cache_path} (записей: {len(ctx.cache.entries)})[/dim]")
+    _sync_and_save_cache(ctx, servers, to_probe)
 
     cache_note = ""
     if ctx.cache:
@@ -1007,6 +1018,12 @@ def main() -> None:
         circuit_breaker=circuit_breaker,
         cached_unique_hosts=cached_unique_hosts,
     )
+
+    # Упреждающее сохранение результатов прямой проверки (Stage 1) до старта Anti-DPI
+    _sync_and_save_cache(ctx, servers, to_probe, label="Stage 1")
+    if ctx.import_path and ctx.cache:
+        with contextlib.suppress(Exception):
+            write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
 
     if not interrupted and ctx.antidpi:
         _execute_antidpi_stage(

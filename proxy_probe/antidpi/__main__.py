@@ -28,7 +28,7 @@ from .benchmark import (
 )
 from .catalogue import fetch_catalogue, get_strategy_by_number, load_catalogue
 from .elevation import TeeOutput, is_admin, run_elevated_and_wait
-from .engine import WinwsRunner, ensure_zapret_binaries
+from .engine import WinwsRunner, cleanup_stale_windivert_service, ensure_zapret_binaries
 from .isp import IspDetectionError, detect_current_isp
 from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, StrategyRating
 from .relay import DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, ZapretRelay
@@ -208,6 +208,7 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     # Обеспечиваем наличие бинарников zapret2
     print("Проверка наличия бинарников Zapret2 (winws.exe, WinDivert)...")
     zapret_dir = ensure_zapret_binaries()
+    cleanup_stale_windivert_service(zapret_dir)
 
     target_ips = [s.server for s in selected if s.server]
     ports = sorted({str(s.server_port) for s in selected if s.server_port})
@@ -438,6 +439,7 @@ def _run_serve(args: argparse.Namespace) -> int:
         return 1
 
     zapret_dir = ensure_zapret_binaries()
+    cleanup_stale_windivert_service(zapret_dir)
 
     print("Запуск изолированного Zapret2-релея:")
     print(f"  - Порт релея: {DEFAULT_RELAY_HOST}:{args.port} (SOCKS5)")

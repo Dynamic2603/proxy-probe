@@ -8,6 +8,7 @@ import pytest
 from proxy_probe.antidpi.engine import (
     WinwsRunner,
     build_windivert_filter,
+    cleanup_stale_windivert_service,
     ensure_zapret_binaries,
 )
 from proxy_probe.antidpi.models import StrategyProfile
@@ -123,3 +124,62 @@ def test_ensure_zapret_binaries_already_exists(tmp_path: Path) -> None:
 
     res = ensure_zapret_binaries(zapret_dir=tmp_path)
     assert res == tmp_path
+
+
+def test_cleanup_stale_windivert_service_not_installed(tmp_path: Path) -> None:
+    with patch("os.name", "nt"), patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1)
+        res = cleanup_stale_windivert_service(zapret_dir=tmp_path)
+        assert res is False
+        mock_run.assert_called_once()
+        assert mock_run.call_args[0][0] == ["sc.exe", "qc", "WinDivert"]
+
+
+def test_cleanup_stale_windivert_service_matching_path(tmp_path: Path) -> None:
+    expected_sys = tmp_path / "WinDivert64.sys"
+    expected_sys.write_text("sys", encoding="utf-8")
+
+    qc_output = f"[SC] QueryServiceConfig SUCCESS\n        BINARY_PATH_NAME   : {expected_sys}\n"
+    with patch("os.name", "nt"), patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=qc_output)
+        res = cleanup_stale_windivert_service(zapret_dir=tmp_path)
+        assert res is False
+        mock_run.assert_called_once()
+
+def test_cleanup_stale_windivert_service_stale_path_deletes_when_admin(tmp_path: Path) -> None:
+    expected_sys = tmp_path / "WinDivert64.sys"
+    expected_sys.write_text("sys", encoding="utf-8")
+
+    qc_output = "[SC] QueryServiceConfig SUCCESS\n        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    with (
+        patch("os.name", "nt"),
+        patch("subprocess.run") as mock_run,
+        patch("proxy_probe.antidpi.elevation.is_admin", return_value=True),
+        patch("time.sleep"),
+    ):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=qc_output),  # sc qc
+            MagicMock(returncode=0),                    # sc stop
+            MagicMock(returncode=0),                    # sc delete
+        ]
+        res = cleanup_stale_windivert_service(zapret_dir=tmp_path)
+        assert res is True
+        assert mock_run.call_count == 3
+        assert mock_run.call_args_list[1][0][0] == ["sc.exe", "stop", "WinDivert"]
+        assert mock_run.call_args_list[2][0][0] == ["sc.exe", "delete", "WinDivert"]
+
+
+def test_cleanup_stale_windivert_service_stale_path_skips_when_not_admin(tmp_path: Path) -> None:
+    expected_sys = tmp_path / "WinDivert64.sys"
+    expected_sys.write_text("sys", encoding="utf-8")
+
+    qc_output = "[SC] QueryServiceConfig SUCCESS\n        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    with (
+        patch("os.name", "nt"),
+        patch("subprocess.run") as mock_run,
+        patch("proxy_probe.antidpi.elevation.is_admin", return_value=False),
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout=qc_output)
+        res = cleanup_stale_windivert_service(zapret_dir=tmp_path)
+        assert res is False
+        mock_run.assert_called_once()

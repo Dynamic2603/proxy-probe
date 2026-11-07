@@ -6,6 +6,8 @@ import functools
 import hashlib
 import ipaddress
 import logging
+import os
+import re
 import shutil
 import socket
 import subprocess
@@ -107,6 +109,60 @@ def ensure_zapret_binaries(
 
     logger.info("Zapret2 успешно развернут в %s", target_dir)
     return target_dir
+
+
+def cleanup_stale_windivert_service(zapret_dir: Path | None = None) -> bool:
+    """Проверяет и очищает устаревшую службу WinDivert в Windows SCM (Anti-brittleness).
+
+    Если в системе уже зарегистрирована служба WinDivert, указывающая на сторонний или
+    несуществующий каталог (например от другого ПО), WinDivertOpen завершается ошибкой
+    ERROR_INVALID_NAME (123) при попытке старта чужого драйвера.
+    При наличии прав Администратора автоматически останавливает и удаляет устаревшую службу,
+    позволяя WinDivert.dll корректно зарегистрировать актуальный драйвер из bin/zapret/.
+    """
+    if os.name != "nt":
+        return False
+
+    zdir = zapret_dir or default_zapret_dir()
+    expected_sys = (zdir / "WinDivert64.sys").resolve()
+
+    try:
+        res = subprocess.run(["sc.exe", "qc", "WinDivert"], capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            return False
+
+        match = re.search(r"BINARY_PATH_NAME\s*:\s*(.+)", res.stdout)
+        if not match:
+            return False
+
+        curr_raw = match.group(1).strip().strip('"')
+        curr_sys = Path(curr_raw).resolve()
+        if curr_sys == expected_sys and curr_sys.is_file():
+            return False
+
+        logger.warning(
+            "Обнаружена некорректная служба WinDivert (%s), ожидается (%s). Сброс службы...",
+            curr_raw,
+            expected_sys,
+        )
+
+        from .elevation import is_admin
+
+        if not is_admin():
+            logger.warning(
+                "Требуются права Администратора для удаления некорректной службы WinDivert (%s).",
+                curr_raw,
+            )
+            return False
+
+        subprocess.run(["sc.exe", "stop", "WinDivert"], capture_output=True, text=True, check=False)
+        del_res = subprocess.run(["sc.exe", "delete", "WinDivert"], capture_output=True, text=True, check=False)
+        time.sleep(0.15)
+        logger.info("Удаление некорректной службы WinDivert завершено (код %d).", del_res.returncode)
+        return del_res.returncode == 0
+    except Exception as exc:
+        logger.debug("Ошибка проверки службы WinDivert: %s", exc)
+        return False
 
 
 @functools.lru_cache(maxsize=2048)
@@ -215,6 +271,8 @@ class WinwsRunner:
         if self.process is not None:
             return
 
+        cleanup_stale_windivert_service(self.zapret_dir)
+
         cmd = self.build_command_line()
         logger.debug("Запуск Zapret2 winws: %s", " ".join(cmd))
 
@@ -252,6 +310,13 @@ class WinwsRunner:
             _ACTIVE_RUNNERS.discard(self)
             rc = self.process.returncode
             self.process = None
+            if "The filename, directory name, or volume label syntax is incorrect" in err_text or rc == 123:
+                err_text += (
+                    "\n[!] Ошибка инициализации драйвера WinDivert (код 123). "
+                    "В системе обнаружена конфликтующая служба WinDivert от сторонней программы. "
+                    "Для сброса выполните от имени Администратора: "
+                    "'sc.exe delete WinDivert' или запустите 'bin\\zapret\\windivert_delete.cmd'."
+                )
             raise RuntimeError(f"Сбой старта {Path(cmd[0]).name} (код {rc}): {err_text}")
 
     def stop(self) -> None:

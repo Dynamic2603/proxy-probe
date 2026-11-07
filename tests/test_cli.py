@@ -596,5 +596,34 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
     assert s in to_probe
 
 
+def test_sync_and_save_cache_flushes_to_disk(tmp_path: Path) -> None:
+    import types
+
+    from proxy_probe.cache import ResultCache
+    from proxy_probe.cli import _sync_and_save_cache
+
+    cache_file = tmp_path / "results.json"
+    cache = ResultCache(path=cache_file)
+    s = Server(
+        group_id=1,
+        group_name="G",
+        name="s1",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={"server": "1.2.3.4", "server_port": 443},
+        source="fresh",
+        result=RESULT_OK,
+        country_code="DE",
+    )
+
+    dummy_ctx = types.SimpleNamespace(cache=cache, cache_path=cache_file)
+    _sync_and_save_cache(dummy_ctx, [s], [s], label="Stage 1")
+
+    assert cache_file.is_file()
+    assert s.cache_key in cache.entries
+    assert cache.entries[s.cache_key]["result"] == RESULT_OK
+
+
 
 

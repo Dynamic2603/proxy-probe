@@ -71,6 +71,40 @@ def test_write_report(tmp_path: Path) -> None:
     assert pos_ok != -1 and pos_block != -1 and pos_ok < pos_block
 
 
+def test_write_report_unique_hosts_formatting(tmp_path: Path) -> None:
+    rep_file = tmp_path / "report_unique.md"
+    s = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"type": "vless"},
+        source="fresh",
+        index=1,
+        result=RESULT_OK,
+    )
+    write_report(
+        servers=[s],
+        report_path=rep_file,
+        ver_sb="1.0.0",
+        ver_xr="2.0.0",
+        warnings=[],
+        time_s=1.0,
+        cached_counts={RESULT_OK: 10, RESULT_BLOCK: 2},
+        cached_unique_hosts={
+            RESULT_OK: {"1.1.1.1:443", "2.2.2.2:443"},
+            RESULT_BLOCK: {"3.3.3.3:443", "4.4.4.4:443"},
+        },
+    )
+
+    content = rep_file.read_text(encoding="utf-8")
+    assert "AGY-OK = 10 (2 уникальных узлов)" in content
+    assert "AGY-BLOCK = 2" in content
+    assert "AGY-BLOCK = 2 (" not in content
+
+
 def test_write_import_file_from_cache(tmp_path: Path) -> None:
     import_file = tmp_path / "proxy-ok.txt"
     cache_file = tmp_path / "results.json"

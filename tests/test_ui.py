@@ -36,6 +36,16 @@ def test_format_cached_counters() -> None:
     assert format_cached_counters({RESULT_OK: 0, RESULT_DEAD: 0}) == ""
 
 
+def test_format_cached_counters_with_unique_hosts() -> None:
+    cached = {RESULT_OK: 10, RESULT_BLOCK: 2}
+    unique = {
+        RESULT_OK: {"1.1.1.1:443", "2.2.2.2:443"},
+        RESULT_BLOCK: {"3.3.3.3:443", "4.4.4.4:443"},
+    }
+    res = format_cached_counters(cached, unique)
+    assert res == "Из кэша: AGY-OK: 10 (2 уникальных), AGY-BLOCK: 2"
+
+
 def test_format_live_counters() -> None:
     counts = {
         RESULT_OK: 32,

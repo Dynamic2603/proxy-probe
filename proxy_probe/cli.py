@@ -32,11 +32,12 @@ from .orchestrator import (
     pause_on_exit,
     run_dir,
 )
-from .parsers import extract_host_port, extract_tag, parse_subscription
+from .parsers import parse_subscription
 from .prober import (
     AGY_PRINT_TIMEOUT_DEFAULT,
     ProcessRegistry,
     QuotaCircuitBreaker,
+    batch_probe_tcp,
     check_agy_health,
     detect_best_agy_model,
     get_default_agy_bin,
@@ -143,6 +144,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="разрешить небезопасные серверы (отключить фильтрацию, даже если она включена в Throne)",
     )
+    ap.add_argument(
+        "--no-tcp-prefilter",
+        action="store_true",
+        help="отключить быстрый предварительный L4 TCP-фильтр (Stage 0)",
+    )
+    ap.add_argument(
+        "--tcp-timeout",
+        type=float,
+        default=1.5,
+        help="таймаут L4 TCP-хэндшейка для Stage 0 (сек, по умолчанию 1.5)",
+    )
+    ap.add_argument(
+        "--tcp-concurrency",
+        type=int,
+        default=100,
+        help="число параллельных потоков L4 TCP-фильтра (по умолчанию 100)",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -173,6 +191,9 @@ class RuntimeContext:
     ver_xr: str
     sb_exe: Path
     xr_exe: Path
+    use_tcp_prefilter: bool = True
+    tcp_timeout: float = 1.5
+    tcp_concurrency: int = 100
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -239,6 +260,9 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         ver_xr=ver_xr,
         sb_exe=sb_exe,
         xr_exe=xr_exe,
+        use_tcp_prefilter=not getattr(args, "no_tcp_prefilter", False),
+        tcp_timeout=float(getattr(args, "tcp_timeout", 1.5)),
+        tcp_concurrency=int(getattr(args, "tcp_concurrency", 100)),
     )
 
 
@@ -247,107 +271,66 @@ def _collect_and_select_servers(
     groups: list[dict[str, Any]],
     cache: ResultCache | None,
     ttl_map: dict[str, int],
-) -> tuple[list[Server], list[Server], dict[str, int], list[str]] | None:
+) -> tuple[list[Server], list[Server], dict[str, int], dict[str, set[str]], list[str]] | None:
     prefetched_subs: dict[str, bytes] = {}
     selected = set(int(x) for x in args.group)
     if not selected:
         counts: dict[int, int] = {}
         for g in groups:
             gid = g["id"]
-            tag_name = g["name"]
-            try:
-                db_items = read_profiles_for_group(gid, tag_name)
-            except Exception:
-                db_items = []
-
             url = g.get("url")
-            online_items: list[Server] = []
-            if url and not args.no_fetch:
-                data = fetch_subscription(url, timeout=15.0)
-                if data is not None:
-                    prefetched_subs[url] = data
-                    for eng, obj in parse_subscription(data):
-                        srv, prt = extract_host_port(obj)
-                        if srv:
-                            online_items.append(
-                                Server(
-                                    group_id=gid,
-                                    group_name=tag_name,
-                                    name=extract_tag(obj) or f"{srv}:{prt}",
-                                    engine=eng,
-                                    server=srv,
-                                    server_port=prt,
-                                    import_obj=obj,
-                                    source="fresh",
-                                )
-                            )
-                    total_count = len(dedupe_servers(db_items + online_items))
-                    counts[gid] = total_count
-                    if db_items and online_items:
-                        print(
-                            f"  подписка «{tag_name}» — {total_count} серверов "
-                            f"(онлайн: {len(online_items)}, БД: {len(db_items)})"
-                        )
-                    elif online_items:
-                        print(f"  подписка «{tag_name}» — {total_count} серверов (свежая онлайн)")
-                    else:
-                        print(f"  подписка «{tag_name}» — {total_count} серверов (из БД)")
-                else:
-                    counts[gid] = len(db_items)
-                    print(f"  подписка «{tag_name}» — {len(db_items)} серверов (онлайн недоступен, взято из БД)")
-            else:
-                counts[gid] = len(db_items)
+            cnt = 0
+            if not args.no_fetch and url:
+                raw_bytes = fetch_subscription(url)
+                if raw_bytes is not None:
+                    prefetched_subs[url] = raw_bytes
+                    cnt = len(parse_subscription(raw_bytes))
+            if cnt == 0:
+                cnt = len(read_profiles_for_group(gid, g.get("name", "")))
+            counts[gid] = cnt
         selected = interactive_select(groups, counts)
+        if not selected:
+            return None
 
-    if not selected:
-        return None
+    filter_insecure: bool | None = None
+    if args.filter_insecure:
+        filter_insecure = True
+    elif args.allow_insecure:
+        filter_insecure = False
 
-    filter_insecure_val: bool | None = None
-    if args.allow_insecure:
-        filter_insecure_val = False
-    elif args.filter_insecure:
-        filter_insecure_val = True
-
-    servers, warnings = gather_sources(
-        groups, selected, args.no_fetch, prefetched=prefetched_subs, filter_insecure=filter_insecure_val
+    raw_servers, warnings = gather_sources(
+        groups,
+        selected,
+        no_fetch=args.no_fetch,
+        prefetched=prefetched_subs,
+        filter_insecure=filter_insecure,
     )
-    for w in warnings:
-        if "Отфильтровано" in w:
-            console.print(f"[yellow]{w}[/yellow]")
-
-    servers = dedupe_servers(servers)
+    servers = dedupe_servers(raw_servers)
     if args.subset > 0:
         servers = servers[: args.subset]
-
-    to_probe: list[Server] = []
-    cached_counts = {res: 0 for res in ttl_map}
-    for s in servers:
-        rec = cache.get_valid_server(s) if (cache and not args.refresh_cache) else None
-        if rec:
-            cached_res = str(rec["result"])
-            s.result = cached_res
-            s.country = str(rec.get("country", ""))
-            s.ip_out = str(rec.get("ip_out", ""))
-            cached_note = str(rec.get("note", "")).strip()
-            checked_at = str(rec.get("checked", ""))
-            if cached_note and not cached_note.startswith("кэш"):
-                s.note = f"{cached_note} [кэш {checked_at}]"
-            else:
-                s.note = f"[кэш {checked_at}]"
-            if cached_res in cached_counts:
-                cached_counts[cached_res] += 1
-            continue
-        to_probe.append(s)
 
     for i, s in enumerate(servers, 1):
         s.index = i
 
-    cache_summary = ", ".join(f"{k}={v}" for k, v in cached_counts.items())
-    print(
-        f"\nВсего серверов: {len(servers)} (к проверке: {len(to_probe)}, из кэша: {cache_summary}, "
-        f"jobs={args.jobs}, таймаут={args.timeout:.0f}с)"
-    )
-    return servers, to_probe, cached_counts, warnings
+    cached_counts: dict[str, int] = {}
+    cached_unique_hosts: dict[str, set[str]] = {}
+    to_probe: list[Server] = []
+
+    for s in servers:
+        rec = cache.get_valid_server(s) if (cache and not args.refresh_cache) else None
+        if rec:
+            res = rec.get("result", "")
+            s.result = res
+            s.country = rec.get("country", "")
+            s.ip_out = rec.get("ip_out", "")
+            s.latency_ms = rec.get("latency_ms", 0)
+            s.note = rec.get("note", "")
+            cached_counts[res] = cached_counts.get(res, 0) + 1
+            cached_unique_hosts.setdefault(res, set()).add(s.host_port)
+        else:
+            to_probe.append(s)
+
+    return servers, to_probe, cached_counts, cached_unique_hosts, warnings
 
 
 def _probe_worker(
@@ -364,30 +347,27 @@ def _probe_worker(
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
 ) -> dict[str, Any]:
-    if stop_event is not None and stop_event.is_set():
-        return {
-            "result": RESULT_DEAD,
-            "country": "",
-            "ip_out": "",
-            "latency_ms": 0,
-            "note": "проверка отменена",
-        }
     port = alloc_port()
-    return run_probe(
-        bin_path,
-        is_xray,
-        import_obj,
-        port,
-        run_root,
-        timeouts,
-        agy_bin=agy_bin,
-        print_timeout=print_timeout,
-        agy_model=agy_model,
-        agy_semaphore=agy_semaphore,
-        circuit_breaker=circuit_breaker,
-        stop_event=stop_event,
-        registry=registry,
-    )
+    try:
+        return run_probe(
+            engine_bin=bin_path,
+            is_xray=is_xray,
+            import_obj=import_obj,
+            port=port,
+            run_root=run_root,
+            timeouts=timeouts,
+            agy_bin=agy_bin,
+            print_timeout=print_timeout,
+            agy_model=agy_model,
+            agy_semaphore=agy_semaphore,
+            circuit_breaker=circuit_breaker,
+            stop_event=stop_event,
+            registry=registry,
+        )
+    finally:
+        d = run_root / f"p{port}"
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def _execute_probe_pool(
@@ -398,12 +378,10 @@ def _execute_probe_pool(
     print_timeout: str,
     cached_counts: dict[str, int] | None = None,
     circuit_breaker: QuotaCircuitBreaker | None = None,
+    cached_unique_hosts: dict[str, set[str]] | None = None,
 ) -> tuple[int, bool]:
-    cb = circuit_breaker or getattr(ctx, "initial_circuit_breaker", None) or QuotaCircuitBreaker()
-    if not to_probe:
-        return 0, False
-
-    cache_line = format_cached_counters(cached_counts or {})
+    cb = circuit_breaker or ctx.initial_circuit_breaker
+    cache_line = format_cached_counters(cached_counts or {}, cached_unique_hosts=cached_unique_hosts)
     if cache_line:
         console.print(f"[dim]{cache_line}[/dim]")
 
@@ -414,12 +392,67 @@ def _execute_probe_pool(
     concurrency = getattr(ctx, "agy_concurrency", 2)
     agy_semaphore = threading.Semaphore(concurrency)
     model = getattr(ctx, "agy_model", None)
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
-    futures: dict[concurrent.futures.Future[Any], Server] = {}
     completed_count = 0
     interrupted = False
 
-    for s in to_probe:
+    # Stage 0: Быстрый предварительный L4 TCP-фильтр (отсечение мёртвых хостов до запуска движков)
+    to_probe_engine: list[Server] = to_probe
+    if getattr(ctx, "use_tcp_prefilter", True) and to_probe:
+        tcp_endpoints = {(s.server, s.server_port) for s in to_probe if s.is_tcp_protocol}
+        if tcp_endpoints:
+            t0_tcp = time.perf_counter()
+            pbar_tcp = tqdm(
+                total=len(tcp_endpoints),
+                desc="L4 TCP предфильтр",
+                unit="host",
+                dynamic_ncols=True,
+            )
+            try:
+                tcp_results = batch_probe_tcp(
+                    tcp_endpoints,
+                    timeout=getattr(ctx, "tcp_timeout", 1.5),
+                    max_workers=getattr(ctx, "tcp_concurrency", 100),
+                    stop_event=stop_event,
+                    progress_callback=lambda _c, _t: pbar_tcp.update(1),
+                )
+            except KeyboardInterrupt:
+                interrupted = True
+                stop_event.set()
+                pbar_tcp.close()
+                return completed_count, interrupted
+            finally:
+                pbar_tcp.close()
+
+            dt_tcp = time.perf_counter() - t0_tcp
+            stage0_dead_cnt = 0
+            survivors: list[Server] = []
+            for s in to_probe:
+                if s.is_tcp_protocol:
+                    res = tcp_results.get((s.server, s.server_port))
+                    if res and not res[0]:
+                        s.result = RESULT_DEAD
+                        s.latency_ms = res[1]
+                        s.note = res[2]
+                        live_counts[RESULT_DEAD] += 1
+                        completed_count += 1
+                        stage0_dead_cnt += 1
+                        continue
+                survivors.append(s)
+
+            if stage0_dead_cnt:
+                console.print(
+                    f"[dim]L4 TCP-предфильтр: проверено {len(tcp_endpoints)} эндпоинтов, "
+                    f"отсеяно {stage0_dead_cnt} мёртвых узлов за {dt_tcp:.1f} с[/dim]"
+                )
+            to_probe_engine = survivors
+
+    if not to_probe_engine or stop_event.is_set():
+        return completed_count, interrupted
+
+    # Stage 1: Полноценная проверка через движки sing-box / Xray
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    futures: dict[concurrent.futures.Future[Any], Server] = {}
+    for s in to_probe_engine:
         bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
         fut = ex.submit(
             _probe_worker,
@@ -438,10 +471,10 @@ def _execute_probe_pool(
         )
         futures[fut] = s
 
-    total = len(to_probe)
+    total = len(to_probe_engine)
     pbar = tqdm(
         total=total,
-        desc="Проверка",
+        desc="Проверка движками",
         unit="srv",
         dynamic_ncols=True,
     )
@@ -506,6 +539,7 @@ def _finalize_and_report(
     cached_counts: dict[str, int],
     interrupted: bool = False,
     circuit_breaker: QuotaCircuitBreaker | None = None,
+    cached_unique_hosts: dict[str, set[str]] | None = None,
 ) -> None:
     if interrupted:
         warnings = list(warnings)
@@ -545,11 +579,21 @@ def _finalize_and_report(
         dt,
         cached_counts=cached_counts,
         cache_note=cache_note,
+        cached_unique_hosts=cached_unique_hosts,
     )
     nb, nx = write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
 
     print_results_table(servers)
-    print_summary_panel(servers, cached_counts, ctx.report_path, ctx.import_path, nb, nx, dt)
+    print_summary_panel(
+        servers,
+        cached_counts,
+        ctx.report_path,
+        ctx.import_path,
+        nb,
+        nx,
+        dt,
+        cached_unique_hosts=cached_unique_hosts,
+    )
 
 
 def main() -> None:
@@ -576,7 +620,7 @@ def main() -> None:
         pause_on_exit(args.no_pause)
         return
 
-    servers, to_probe, cached_counts, warnings = selection
+    servers, to_probe, cached_counts, cached_unique_hosts, warnings = selection
     timeouts = {
         "start": min(args.timeout, 12.0),
         "preflight": 4.0,
@@ -598,6 +642,7 @@ def main() -> None:
         print_timeout=print_timeout,
         cached_counts=cached_counts,
         circuit_breaker=circuit_breaker,
+        cached_unique_hosts=cached_unique_hosts,
     )
     dt = time.time() - t0
 
@@ -610,6 +655,7 @@ def main() -> None:
         cached_counts=cached_counts,
         interrupted=interrupted,
         circuit_breaker=circuit_breaker,
+        cached_unique_hosts=cached_unique_hosts,
     )
 
     if interrupted:

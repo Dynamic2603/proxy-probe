@@ -167,3 +167,151 @@ def test_gather_sources_filters_insecure(monkeypatch) -> None:
     assert len(servers) == 1
     assert servers[0].server == "2.2.2.2"
     assert any("Отфильтровано 1 небезопасных" in w for w in warnings)
+
+
+def test_dedupe_servers_cross_dialect_xray_and_singbox() -> None:
+    s_db = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s-db",
+        engine="xray",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": "1.2.3.4",
+                    "port": 443,
+                    "users": [{"id": "uuid-1234", "flow": "xtls-rprx-vision"}],
+                }]
+            },
+            "streamSettings": {
+                "security": "reality",
+                "realitySettings": {
+                    "serverName": "example.com",
+                    "publicKey": "pk-1234",
+                    "fingerprint": "chrome",
+                    "spiderX": "",
+                },
+            },
+            "tag": "db-tag",
+            "packet_encoding": "xudp",
+        },
+        source="db",
+    )
+    s_fresh = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s-fresh",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "uuid": "uuid-1234",
+            "flow": "xtls-rprx-vision",
+            "tls": {
+                "enabled": True,
+                "server_name": "example.com",
+                "utls": {"enabled": True, "fingerprint": "chrome"},
+                "reality": {"enabled": True, "public_key": "pk-1234", "short_id": ""},
+            },
+            "tag": "fresh-tag",
+        },
+        source="fresh",
+    )
+
+    deduped = dedupe_servers([s_db, s_fresh])
+    assert len(deduped) == 1
+    assert deduped[0].source == "fresh"
+    assert deduped[0].name == "s-fresh"
+
+
+def test_dedupe_servers_distinct_utls_fingerprints() -> None:
+    s_chrome = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s-chrome",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "uuid": "uuid-1234",
+            "tls": {
+                "server_name": "example.com",
+                "utls": {"fingerprint": "chrome"},
+            },
+        },
+        source="fresh",
+    )
+    s_firefox = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s-firefox",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "uuid": "uuid-1234",
+            "tls": {
+                "server_name": "example.com",
+                "utls": {"fingerprint": "firefox"},
+            },
+        },
+        source="fresh",
+    )
+    deduped = dedupe_servers([s_chrome, s_firefox])
+    assert len(deduped) == 2
+
+
+def test_dedupe_servers_identical_utls_fingerprints() -> None:
+    s1 = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s1",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "uuid": "uuid-1234",
+            "tls": {
+                "server_name": "example.com",
+                "utls": {"fingerprint": "firefox"},
+            },
+        },
+        source="db",
+    )
+    s2 = Server(
+        group_id=1,
+        group_name="Group1",
+        name="s2",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "1.2.3.4",
+            "server_port": 443,
+            "uuid": "uuid-1234",
+            "tls": {
+                "server_name": "example.com",
+                "utls": {"fingerprint": "firefox"},
+            },
+        },
+        source="fresh",
+    )
+    deduped = dedupe_servers([s1, s2])
+    assert len(deduped) == 1
+    assert deduped[0].source == "fresh"

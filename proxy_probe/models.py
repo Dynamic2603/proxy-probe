@@ -166,6 +166,7 @@ class Server:
     web_status: str = ""
     ingress_country_code: str = ""
     ingress_ip: str = ""
+    antidpi_strategy: int | None = None
     _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _endpoint_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)
@@ -189,6 +190,9 @@ class Server:
 
         if self.web_status == WEB_STATUS_CAPTCHA:
             badge = f"{badge}[captcha]" if badge else "[captcha]"
+        if self.antidpi_strategy is not None:
+            zapret_badge = f"[zapret:S{self.antidpi_strategy:02d}]"
+            badge = f"{badge}{zapret_badge}" if badge else zapret_badge
         return badge
 
     @property
@@ -427,23 +431,25 @@ class Server:
         return res
 
     @property
-    def export_rank(self) -> tuple[int, int, int, int, int, int]:
+    def export_rank(self) -> tuple[int, int, int, int, int, int, int]:
         """Критерий сравнительной ценности узла при экспорте в подписку (SSOT).
 
         Иерархия (от более важных к менее важным):
         1. Состояние: ACTIVE (1) строго выше DEGRADED (0).
-        2. Скор надежности (0..100): стабильные узлы выше (score).
-        3. Задержка: меньший пинг предпочтительнее (-latency_ms).
-        4. Свежесть источника: живая проверка (fresh/db = 1) предпочтительнее исторического кэша (cache = 0).
-        5. Вес TLS-отпечатка: популярные браузерные отпечатки (Chrome > Firefox > ...) выше экзотических.
-        6. Порядок подписки: сохранение оригинальной позиции (-index).
+        2. Прямой доступ: прямое подключение без Zapret (1) предпочтительнее требующего Zapret (0).
+        3. Скор надежности (0..100): стабильные узлы выше (score).
+        4. Задержка: меньший пинг предпочтительнее (-latency_ms).
+        5. Свежесть источника: живая проверка (fresh/db = 1) предпочтительнее исторического кэша (cache = 0).
+        6. Вес TLS-отпечатка: популярные браузерные отпечатки (Chrome > Firefox > ...) выше экзотических.
+        7. Порядок подписки: сохранение оригинальной позиции (-index).
         """
         state_weight = 1 if self.state == STATE_ACTIVE else 0
+        direct_weight = 1 if self.antidpi_strategy is None else 0
         lat_weight = -self.latency_ms if self.latency_ms > 0 else -999999
         source_weight = 0 if self.source == "cache" else 1
         fp_name = (self.fingerprint or "").strip().lower()
         fp_rank = FINGERPRINT_PRIORITIES.get(fp_name, 1 if fp_name else 0)
-        return (state_weight, self.score, lat_weight, source_weight, fp_rank, -self.index)
+        return (state_weight, direct_weight, self.score, lat_weight, source_weight, fp_rank, -self.index)
 
     @property
     def cache_key(self) -> str:

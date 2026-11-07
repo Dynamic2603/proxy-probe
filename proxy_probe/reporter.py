@@ -200,6 +200,7 @@ def write_import_file(
                 org=str(entry.get("org", "")),
                 ingress_country_code=str(entry.get("ingress_country_code", "")),
                 ingress_ip=str(entry.get("ingress_ip", "")),
+                antidpi_strategy=entry.get("antidpi_strategy"),
                 score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
                 state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
                 consecutive_fails=int(entry.get("consecutive_fails", 0)),
@@ -219,12 +220,40 @@ def write_import_file(
         )
     )
 
+    has_zapret_sb = False
+    has_zapret_xr = False
+
     for s in ok_servers:
         prepared = _prepare_obj(s)
-        if s.engine == "xray" or (not s.engine and s.import_obj.get("protocol")):
+        is_xray = s.engine == "xray" or (not s.engine and s.import_obj.get("protocol"))
+        if s.antidpi_strategy is not None:
+            if is_xray:
+                prepared["proxySettings"] = {"tag": "zapret-relay"}
+                has_zapret_xr = True
+            else:
+                prepared["detour"] = "zapret-relay"
+                has_zapret_sb = True
+
+        if is_xray:
             xr.append(prepared)
         else:
             sb.append(prepared)
+
+    if has_zapret_sb:
+        sb.append({
+            "type": "socks",
+            "tag": "zapret-relay",
+            "server": "127.0.0.1",
+            "server_port": 10850,
+        })
+    if has_zapret_xr:
+        xr.append({
+            "protocol": "socks",
+            "tag": "zapret-relay",
+            "settings": {
+                "servers": [{"address": "127.0.0.1", "port": 10850}]
+            },
+        })
 
     if path.exists() and path.stat().st_size > 0:
         try:

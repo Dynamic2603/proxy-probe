@@ -651,6 +651,7 @@ def run_probe(
     registry: ProcessRegistry | None = None,
     use_geo_precheck: bool = True,
     check_web: bool = False,
+    extra_outbounds: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if stop_event is not None and stop_event.is_set():
         return {
@@ -668,10 +669,10 @@ def run_probe(
     resolved_agy_bin = agy_bin or get_default_agy_bin()
     if is_xray:
         test_out = xray_shorthand_to_v2ray(import_obj)
-        cfg = build_xray_config(test_out, port)
+        cfg = build_xray_config(test_out, port, extra_outbounds=extra_outbounds)
         cmd = [engine_bin, "run", "-c", "stdin:"]
     else:
-        cfg = build_singbox_config(import_obj, port)
+        cfg = build_singbox_config(import_obj, port, extra_outbounds=extra_outbounds)
         cmd = [engine_bin, "run", "-c", "stdin"]
 
     cfg_bytes = json.dumps(cfg, ensure_ascii=False).encode("utf-8")

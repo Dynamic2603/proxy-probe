@@ -592,3 +592,63 @@ def test_write_import_file_fingerprint_deduplication(tmp_path: Path) -> None:
     assert data[0]["tls"]["utls"]["fingerprint"] == "chrome"
     assert "fp: chrome" in data[0]["tag"]
 
+
+def test_write_import_file_antidpi_detour(tmp_path: Path) -> None:
+    from proxy_probe.models import STATE_ACTIVE
+
+    import_file = tmp_path / "antidpi-ok.txt"
+
+    s_direct = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_direct",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"type": "vless", "server": "1.1.1.1", "server_port": 443},
+        source="fresh",
+        index=1,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        antidpi_strategy=None,
+    )
+    s_zapret = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_zapret",
+        engine="sing-box",
+        server="2.2.2.2",
+        server_port=443,
+        import_obj={"type": "vless", "server": "2.2.2.2", "server_port": 443},
+        source="fresh",
+        index=2,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        antidpi_strategy=1,
+    )
+
+    sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_direct, s_zapret])
+    assert sb_cnt == 3  # 2 сервера + 1 zapret-relay outbound
+    assert xr_cnt == 0
+
+    content = import_file.read_text(encoding="utf-8").strip()
+    data = json.loads(content)
+    assert len(data) == 3
+
+    # Прямой сервер
+    direct_obj = next(d for d in data if d.get("server") == "1.1.1.1")
+    assert "detour" not in direct_obj
+    assert "[zapret" not in direct_obj.get("tag", "")
+
+    # Реанимированный сервер
+    zapret_obj = next(d for d in data if d.get("server") == "2.2.2.2")
+    assert zapret_obj.get("detour") == "zapret-relay"
+    assert "[zapret:S01]" in zapret_obj.get("tag", "")
+
+    # Объект zapret-relay
+    relay_obj = next(d for d in data if d.get("tag") == "zapret-relay")
+    assert relay_obj["type"] == "socks"
+    assert relay_obj["server_port"] == 10850
+

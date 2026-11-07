@@ -77,6 +77,7 @@ def _normalize_entry(rec: dict) -> dict:
     rec.setdefault("web_status", "")
     rec.setdefault("ingress_country_code", "")
     rec.setdefault("ingress_ip", "")
+    rec.setdefault("antidpi_strategy", None)
 
     # Ретроактивная нормализация: геоблоки никогда не могут быть в DEGRADED
     if res in TERMINAL_FAILURES and rec.get("state") == STATE_DEGRADED:
@@ -219,6 +220,9 @@ class ResultCache:
             "web_status": server.web_status or cur.get("web_status", ""),
             "ingress_country_code": server.ingress_country_code or cur.get("ingress_country_code", ""),
             "ingress_ip": server.ingress_ip or cur.get("ingress_ip", ""),
+            "antidpi_strategy": (
+                server.antidpi_strategy if server.antidpi_strategy is not None else cur.get("antidpi_strategy")
+            ),
             "state": new_state,
             "score": new_score,
             "consecutive_fails": new_fails,

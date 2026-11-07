@@ -30,6 +30,7 @@ bin/
 report.md
 proxy-ok.txt
 results.json
+data/antidpi_ratings.json
 *-report.md
 *-verify.md
 *-ok.txt

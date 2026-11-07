@@ -85,5 +85,18 @@
     - SSOT и DRY: единый метод `Server._parse_config_parts()` извлекает канонический кортеж параметров, используемый как для `config_identity`, так и для `endpoint_identity`.
     - Иерархия отбора лучшего профиля (`Server.export_rank`): объективные замеры имеют абсолютный приоритет (`ACTIVE` > `DEGRADED`, больший `score`, меньший `latency_ms`, свежая проверка `fresh/db` > старый `cache`). Приоритет отпечатка (`FINGERPRINT_PRIORITIES`: `chrome` > `firefox` > `safari` > ...) используется исключительно как финальный тай-брейкер для защиты от эвристик DPI.
     - Изоляция ответственности (SRP): чистая функция `deduplicate_by_endpoint` в `proxy_probe/reporter.py` отбирает ровно один лучший рабочий профиль на каждый эндпоинт, устраняя клоны одного сервера с разными `fp` в `proxy-ok.txt` и снижая нагрузку на Throne.
+17. **Изолированный Anti-DPI релей и локальный рейтинг стратегий (Isolated Zapret2 Relay & Benchmark)**:
+    - Полная изоляция от системного трафика (Zero System Interception): строгий отказ от глобального перехвата сетевого стека Windows (`--wf-tcp-out=443`). В WinDivert передаётся строгий белый список целевых IP (`--wf-raw-filter="ip.DstAddr in { <dead_ip1>, ... }"`). Трафик браузеров, банковских приложений, игр и ОС на 100% минует драйвер перехвата.
+    - Автономный SOCKS5-релей (`ZapretRelay`): локальный in-memory процесс `sing-box` на `127.0.0.1:10850` с `direct` outbound. В него направляются исключительно те серверы, которые не работают напрямую (`DEAD`).
+    - Двухуровневый конвейер (Stage 1 direct -> Stage 2 Anti-DPI): работающие напрямую узлы соединяются напрямую с нулевым оверхедом (0% WinDivert). Узлы с сетевыми сбоями/сбросами DPI получают попытку спасения в Stage 2 (CLI-флаг `--antidpi`).
+    - Каталог стратегий и бенчмарк под провайдера (`proxy_probe/antidpi`):
+      - Каталог из 484 стратегий (`anti-dpi-for-russia`, `data/antidpi_catalogue.json`) с разделением на семейства (Golden/Silver).
+      - Бенчмарк ТОП-стратегий (`py -m proxy_probe.antidpi benchmark`) тестирует упавшие серверы и сохраняет локальный объективный рейтинг под конкретного провайдера пользователя в `data/antidpi_ratings.json`.
+      - Автообновление каталога из upstream (`py -m proxy_probe.antidpi update`).
+      - Сервис изолированного релея (`py -m proxy_probe.antidpi serve`).
+    - Прозрачная маршрутизация (Detour) в `proxy-ok.txt`:
+      - Для sing-box: `"detour": "zapret-relay"` + инъекция релея в `outbounds`.
+      - Для Xray: `"proxySettings": {"tag": "zapret-relay"}` + инъекция релея в `outbounds`.
+      - Индикация в теге: `[zapret:S01]` фиксирует конкретный номер стратегии, спасшей узел.
 
 

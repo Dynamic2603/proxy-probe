@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -445,6 +446,152 @@ def test_setup_environment_geo_precheck_flags() -> None:
     assert ctx.use_geo_precheck is True
     assert ctx.geo_precheck_timeout == 3.0
     assert ctx.check_web is True
+
+
+def test_cli_antidpi_flags() -> None:
+    parser = build_arg_parser()
+    # Defaults
+    args = parser.parse_args([])
+    assert args.antidpi is False
+    assert args.antidpi_strategy is None
+    assert args.antidpi_port == 10850
+
+    # Custom
+    custom_args = parser.parse_args(["--antidpi", "--antidpi-strategy", "7", "--antidpi-port", "10860"])
+    assert custom_args.antidpi is True
+    assert custom_args.antidpi_strategy == 7
+    assert custom_args.antidpi_port == 10860
+
+
+def test_setup_environment_antidpi_flags() -> None:
+    from proxy_probe.cli import _setup_environment
+
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "--antidpi",
+        "--antidpi-strategy",
+        "3",
+        "--antidpi-port",
+        "10852",
+        "--skip-precheck",
+        "--no-cache",
+    ])
+
+    with patch("proxy_probe.cli._resolve_agy_bin", return_value="agy"), \
+         patch("proxy_probe.cli.detect_throne_versions", return_value=("1.0", "1.0")), \
+         patch("proxy_probe.cli.ensure_binaries", return_value=(Path("sb"), Path("xr"))):
+        ctx = _setup_environment(args)
+
+    assert ctx.antidpi is True
+    assert ctx.antidpi_strategy == 3
+    assert ctx.antidpi_port == 10852
+
+
+def test_execute_antidpi_stage_disabled() -> None:
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=False,
+    )
+    s = Server(
+        group_id=1,
+        group_name="Test",
+        name="s1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={},
+        source="fresh",
+        result=RESULT_DEAD,
+    )
+    rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+    assert rescued == 0
+    assert s.result == RESULT_DEAD
+
+
+def test_execute_antidpi_stage_rescues_dead() -> None:
+    from proxy_probe.antidpi.models import StrategyProfile
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        antidpi_strategy=1,
+    )
+    s = Server(
+        group_id=1,
+        group_name="Test",
+        name="dead_srv",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={"server": "1.2.3.4", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+    )
+
+    dummy_strat = StrategyProfile(
+        number=1,
+        family_number=1,
+        family_name="Golden",
+        variant=1,
+        name="Fake Strategy",
+        chain="fake",
+        args=("--fake",),
+        is_golden=True,
+    )
+    mock_res = {
+        "result": RESULT_OK,
+        "country": "Germany",
+        "ip_out": "1.2.3.4",
+        "country_code": "DE",
+        "city": "Frankfurt",
+        "org": "Hetzner",
+        "latency_ms": 55,
+    }
+
+    with patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
+         patch("proxy_probe.antidpi.catalogue.get_strategy_by_number", return_value=dummy_strat), \
+         patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
+         patch("proxy_probe.antidpi.engine.WinwsRunner") as mock_runner, \
+         patch("proxy_probe.cli._probe_worker", return_value=mock_res):
+        mock_relay.return_value.__enter__.return_value = None
+        mock_runner.return_value.__enter__.return_value = None
+
+        to_probe: list[Server] = []
+        rescued = _execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
+
+    assert rescued == 1
+    assert s.result == RESULT_OK
+    assert s.antidpi_strategy == 1
+    assert s.country_code == "DE"
+    assert s in to_probe
+
 
 
 

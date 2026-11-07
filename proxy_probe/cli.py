@@ -209,6 +209,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="ID GitHub Secret Gist для автоматической публикации proxy-ok.txt (или переменная PROXY_PROBE_GIST_ID)",
     )
+    ap.add_argument(
+        "--antidpi",
+        action="store_true",
+        help="оживлять заблокированные серверы (DEAD) через изолированный Zapret2 SOCKS5-релей",
+    )
+    ap.add_argument(
+        "--antidpi-strategy",
+        type=int,
+        default=None,
+        help="номер стратегии Zapret2 для релея (по умолчанию лучшая из локального рейтинга)",
+    )
+    ap.add_argument(
+        "--antidpi-port",
+        type=int,
+        default=10850,
+        help="порт локального изолированного SOCKS5-релея (по умолчанию 10850)",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -250,6 +267,9 @@ class RuntimeContext:
     table_mode: str = "ok"
     table_limit: int = 20
     gist_id: str | None = None
+    antidpi: bool = False
+    antidpi_strategy: int | None = None
+    antidpi_port: int = 10850
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -337,6 +357,9 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         table_mode=str(getattr(args, "table", "ok")),
         table_limit=int(getattr(args, "table_limit", 20)),
         gist_id=gist_id,
+        antidpi=bool(getattr(args, "antidpi", False)),
+        antidpi_strategy=getattr(args, "antidpi_strategy", None),
+        antidpi_port=int(getattr(args, "antidpi_port", 10850)),
     )
 
 
@@ -420,6 +443,7 @@ def _probe_worker(
     run_root: Path | None = None,
     use_geo_precheck: bool = True,
     check_web: bool = False,
+    extra_outbounds: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     port = alloc_port()
     return run_probe(
@@ -438,6 +462,7 @@ def _probe_worker(
         registry=registry,
         use_geo_precheck=use_geo_precheck,
         check_web=check_web,
+        extra_outbounds=extra_outbounds,
     )
 
 
@@ -644,6 +669,153 @@ def _execute_probe_pool(
     return completed_count, interrupted
 
 
+def _execute_antidpi_stage(
+    servers: list[Server],
+    to_probe: list[Server],
+    ctx: RuntimeContext,
+    timeouts: dict[str, float],
+    print_timeout: str,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
+) -> int:
+    """Stage 2: Оживление DEAD серверов через изолированный Zapret2 SOCKS5-релей (SSOT)."""
+    if not ctx.antidpi:
+        return 0
+
+    from .antidpi.benchmark import build_relay_detour, load_ratings
+    from .antidpi.catalogue import get_golden_strategies, get_strategy_by_number
+    from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
+    from .antidpi.relay import ZapretRelay
+    from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
+
+    dead_candidates = [s for s in servers if s.result == RESULT_DEAD and s.server]
+    if not dead_candidates:
+        console.print("[dim]Anti-DPI: серверов со статусом DEAD нет, запуск релея не требуется.[/dim]")
+        return 0
+
+    target_ips = {s.server for s in dead_candidates if s.server}
+    if not target_ips:
+        return 0
+
+    strat_num = ctx.antidpi_strategy
+    if strat_num is None:
+        ratings = load_ratings()
+        if ratings and ratings.best_strategy_number:
+            strat_num = ratings.best_strategy_number
+        else:
+            golden = get_golden_strategies()
+            strat_num = golden[0].number if golden else 1
+
+    strat = get_strategy_by_number(strat_num)
+    if not strat:
+        console.print(f"[yellow]Anti-DPI: стратегия S{strat_num:02d} не найдена в каталоге.[/yellow]")
+        return 0
+
+    try:
+        zapret_dir = ensure_zapret_binaries()
+    except Exception as exc:
+        console.print(f"[yellow]Anti-DPI: не удалось загрузить бинарники Zapret2 ({exc}). Пропуск Stage 2.[/yellow]")
+        return 0
+
+    console.print(
+        f"\n[bold cyan]Stage 2: Anti-DPI Релей[/bold cyan] (стратегия S{strat.number:02d} {strat.name[:35]}, "
+        f"целей: {len(target_ips)} IP, порт {ctx.antidpi_port})..."
+    )
+
+    relay_port = ctx.antidpi_port
+    rescued_count = 0
+    pbar = tqdm(
+        total=len(dead_candidates),
+        desc="Anti-DPI попытка спасения",
+        unit="srv",
+        dynamic_ncols=True,
+    )
+
+    try:
+        with (
+            ZapretRelay(port=relay_port),
+            WinwsRunner(strategy=strat, target_ips=target_ips, zapret_dir=zapret_dir),
+        ):
+            concurrency = getattr(ctx, "agy_concurrency", 2)
+            agy_semaphore = threading.Semaphore(concurrency)
+            model = getattr(ctx, "agy_model", None)
+            registry = ProcessRegistry()
+            stop_event = threading.Event()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(dead_candidates), 4)) as ex:
+                futures = {}
+                for s in dead_candidates:
+                    detour_patch, relay_outbound = build_relay_detour(
+                        is_xray=(s.engine == "xray"),
+                        relay_port=relay_port,
+                    )
+                    patched_obj = dict(s.import_obj)
+                    patched_obj.update(detour_patch)
+                    bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
+                    fut = ex.submit(
+                        _probe_worker,
+                        bin_path,
+                        s.engine == "xray",
+                        patched_obj,
+                        timeouts,
+                        ctx.agy_bin,
+                        print_timeout,
+                        agy_model=model,
+                        agy_semaphore=agy_semaphore,
+                        circuit_breaker=circuit_breaker,
+                        stop_event=stop_event,
+                        registry=registry,
+                        use_geo_precheck=ctx.use_geo_precheck,
+                        check_web=ctx.check_web,
+                        extra_outbounds=[relay_outbound],
+                    )
+                    futures[fut] = s
+
+                for fut in concurrent.futures.as_completed(futures):
+                    srv = futures[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as exc:
+                        res = {"result": RESULT_DEAD, "note": str(exc)}
+
+                    if res.get("result") == RESULT_OK:
+                        srv.result = RESULT_OK
+                        srv.country = res.get("country", "")
+                        srv.ip_out = res.get("ip_out", "")
+                        srv.country_code = res.get("country_code", "")
+                        srv.city = res.get("city", "")
+                        srv.org = res.get("org", "")
+                        srv.latency_ms = res.get("latency_ms", 0)
+                        srv.note = f"оживлен через Zapret S{strat.number:02d}"
+                        srv.web_status = res.get("web_status", "")
+                        srv.ingress_country_code = res.get("ingress_country_code", "")
+                        srv.ingress_ip = res.get("ingress_ip", "")
+                        srv.antidpi_strategy = strat.number
+                        srv.state = STATE_ACTIVE
+                        rescued_count += 1
+                        if srv not in to_probe:
+                            to_probe.append(srv)
+                    pbar.update(1)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stage 2 прерван пользователем.[/yellow]")
+    except Exception as exc:
+        console.print(f"[yellow]Ошибка работы Stage 2 Anti-DPI: {exc}[/yellow]")
+    finally:
+        pbar.close()
+
+    if rescued_count > 0:
+        total_dead = len(dead_candidates)
+        console.print(
+            f"[bold green]✓ Anti-DPI релей успешно оживил {rescued_count} из {total_dead} серверов![/bold green]"
+        )
+    else:
+        console.print(
+            f"[dim]Anti-DPI: стратегия S{strat.number:02d} не смогла оживить проверенные DEAD серверы.[/dim]"
+        )
+
+    return rescued_count
+
+
 def _finalize_and_report(
     ctx: RuntimeContext,
     servers: list[Server],
@@ -769,6 +941,17 @@ def main() -> None:
         circuit_breaker=circuit_breaker,
         cached_unique_hosts=cached_unique_hosts,
     )
+
+    if not interrupted and ctx.antidpi:
+        _execute_antidpi_stage(
+            servers=servers,
+            to_probe=to_probe,
+            ctx=ctx,
+            timeouts=timeouts,
+            print_timeout=print_timeout,
+            circuit_breaker=circuit_breaker,
+        )
+
     dt = time.time() - t0
 
     _finalize_and_report(

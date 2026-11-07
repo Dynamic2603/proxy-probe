@@ -10,6 +10,7 @@ import sys
 import time
 
 from ..cache import ResultCache, default_cache_path
+from ..models import Server
 from ..parsers import extract_host_port
 from .benchmark import (
     calculate_strategy_score,
@@ -43,6 +44,71 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 1
 
 
+def collect_dead_candidates(cache: ResultCache) -> list[Server]:
+    """Собирает список серверов-кандидатов для Anti-DPI бенчмарка (SSOT).
+
+    Приоритетно считывает актуальные профили из базы Throne,
+    сопоставляя их с результатами проверок в кэше.
+    При недоступности Throne использует сохраненные в кэше результаты.
+    """
+    candidates: list[Server] = []
+    seen_identities: set[str] = set()
+
+    # 1. Попытка загрузить актуальные серверы из локальной базы Throne
+    try:
+        from ..throne import read_groups, read_profiles_for_group
+
+        groups = read_groups()
+        for g in groups:
+            for s in read_profiles_for_group(g["id"], g["name"]):
+                cid = s.config_identity
+                if cid in seen_identities:
+                    continue
+                seen_identities.add(cid)
+
+                entry = cache.entries.get(cid) or cache.entries.get(s.cache_key) or {}
+                if entry:
+                    s.result = str(entry.get("result", ""))
+                    s.state = str(entry.get("state", ""))
+                    s.note = str(entry.get("note", ""))
+                candidates.append(s)
+    except Exception as exc:
+        logger.debug("Сбор кандидатов из Throne пропущен: %s", exc)
+
+    # 2. Если Throne пуст или недоступен, фоллбэк на базу кэша
+    if not candidates:
+        for _k, entry in cache.entries.items():
+            res = str(entry.get("result", ""))
+            state = str(entry.get("state", ""))
+            raw_obj = entry.get("import_obj")
+            if not isinstance(raw_obj, dict):
+                continue
+            host, port = extract_host_port(raw_obj)
+            if not host or not port:
+                continue
+            engine = str(entry.get("engine") or ("xray" if "protocol" in raw_obj else "sing-box"))
+            s = Server(
+                group_id=0,
+                group_name="",
+                name=str(raw_obj.get("tag", "")),
+                engine=engine,
+                server=host,
+                server_port=port,
+                import_obj=raw_obj,
+                source="cache",
+                result=res,
+                state=state,
+                note=str(entry.get("note") or ""),
+            )
+            cid = s.config_identity
+            if cid in seen_identities:
+                continue
+            seen_identities.add(cid)
+            candidates.append(s)
+
+    return candidates
+
+
 def cmd_benchmark(args: argparse.Namespace) -> int:
     cache_path = default_cache_path()
     if not cache_path.is_file():
@@ -50,35 +116,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         return 1
 
     cache = ResultCache(path=cache_path)
-    from ..models import Server
+    dead_candidates = collect_dead_candidates(cache)
 
-    dead_candidates: list[Server] = []
-    for _k, entry in cache.entries.items():
-        res = str(entry.get("result", ""))
-        state = str(entry.get("state", ""))
-        raw_obj = entry.get("import_obj")
-        if not isinstance(raw_obj, dict):
-            continue
-        host, port = extract_host_port(raw_obj)
-        if not host or not port:
-            continue
-        engine = str(entry.get("engine") or ("xray" if "protocol" in raw_obj else "sing-box"))
-        s = Server(
-            group_id=0,
-            group_name="",
-            name=str(raw_obj.get("tag", "")),
-            engine=engine,
-            server=host,
-            server_port=port,
-            import_obj=raw_obj,
-            source="cache",
-            result=res,
-            state=state,
-            note=str(entry.get("note") or ""),
-        )
-        dead_candidates.append(s)
-
-    selected = select_dead_servers(dead_candidates, limit=args.limit)
+    verify_tcp = not getattr(args, "no_tcp_verify", False)
+    selected = select_dead_servers(dead_candidates, limit=args.limit, verify_tcp=verify_tcp)
     if not selected:
         print("В базе кэша не найдено серверов с сетевым таймаутом (DEAD). Тестирование не требуется.")
         return 0
@@ -275,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=15,
         help="Количество параллельных проверок серверов (по умолчанию 15)",
+    )
+    p_bench.add_argument(
+        "--no-tcp-verify",
+        action="store_true",
+        help="Отключить быструю проверку L4 TCP связности перед запуском бенчмарка",
     )
     p_bench.set_defaults(func=cmd_benchmark)
 

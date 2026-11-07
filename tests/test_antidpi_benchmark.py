@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from proxy_probe.antidpi.benchmark import (
     apply_relay_detour,
@@ -145,3 +146,43 @@ def test_format_benchmark_table() -> None:
     assert "80%" in table
     assert "75 мс" in table
     assert "Golden 1" in table
+
+
+def test_select_dead_servers_ranking() -> None:
+    s_l4_dead = make_srv("1.1.1.1", RESULT_DEAD)
+    s_l4_dead.note = "tcp: таймаут соединения (хост не отвечает)"
+
+    s_preflight = make_srv("2.2.2.2", RESULT_DEAD)
+    s_preflight.note = "preflight: туннель не пропускает трафик"
+
+    s_degraded = make_srv("3.3.3.3", RESULT_DEAD)
+    s_degraded.state = "DEGRADED"
+
+    selected = select_dead_servers([s_l4_dead, s_preflight, s_degraded], limit=2)
+    assert len(selected) == 2
+    # Preflight и Degraded должны идти раньше мертвого L4 TCP
+    assert selected[0].server == "2.2.2.2"
+    assert selected[1].server == "3.3.3.3"
+
+
+def test_collect_dead_candidates_from_cache(tmp_path: Path) -> None:
+    from proxy_probe.antidpi.__main__ import collect_dead_candidates
+    from proxy_probe.cache import ResultCache
+
+    c_file = tmp_path / "test_cache.json"
+    cache = ResultCache(path=c_file)
+    cache.entries = {
+        "s1": {
+            "result": RESULT_DEAD,
+            "state": "DEAD",
+            "note": "preflight drop",
+            "import_obj": {"type": "vless", "server": "8.8.8.8", "server_port": 443},
+        }
+    }
+
+    # Подменяем чтение Throne, чтобы проверить fallback
+    with patch("proxy_probe.throne.read_groups", side_effect=RuntimeError("no throne")):
+        cands = collect_dead_candidates(cache)
+        assert len(cands) == 1
+        assert cands[0].server == "8.8.8.8"
+        assert cands[0].note == "preflight drop"

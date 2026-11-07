@@ -160,6 +160,8 @@ class WinwsRunner:
         self.zapret_dir = zapret_dir or default_zapret_dir()
         self.ports = ports
         self.process: subprocess.Popen | None = None
+        self._log_file = None
+        self._log_path = self.zapret_dir / "winws.log"
 
     def build_command_line(self) -> list[str]:
         """Строит аргументы вызова winws2.exe со строгим IP-фильтром."""
@@ -174,14 +176,14 @@ class WinwsRunner:
             f"--wf-raw-filter={raw_filter}",
         ]
 
-        # Подключение Lua библиотек zapret2
+        # Подключение Lua библиотек zapret2 (строго с прямыми слэшами для Cygwin runtime)
         lua_dir = self.zapret_dir / "lua"
         lib_lua = lua_dir / "zapret-lib.lua"
         antidpi_lua = lua_dir / "zapret-antidpi.lua"
         if lib_lua.is_file():
-            cmd.append(f"--lua-init=@{lib_lua}")
+            cmd.append(f"--lua-init=@{lib_lua.as_posix()}")
         if antidpi_lua.is_file():
-            cmd.append(f"--lua-init=@{antidpi_lua}")
+            cmd.append(f"--lua-init=@{antidpi_lua.as_posix()}")
 
         cmd.append("--lua-init=fake_default_tls = tls_mod(fake_default_tls,'rnd,rndsni')")
 
@@ -190,7 +192,7 @@ class WinwsRunner:
 
         actual_guard = self.zapret_dir / "actual_tls_guard.lua"
         if actual_guard.is_file() and any("blob=reasm_data" in a for a in self.strategy.args):
-            cmd.append(f"--lua-init=@{actual_guard}")
+            cmd.append(f"--lua-init=@{actual_guard.as_posix()}")
 
         # Добавляем аргументы выбранной стратегии
         cmd.extend(self.strategy.args)
@@ -204,11 +206,17 @@ class WinwsRunner:
         cmd = self.build_command_line()
         logger.debug("Запуск Zapret2 winws: %s", " ".join(cmd))
 
+        self.zapret_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._log_file = open(self._log_path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            self._log_file = None
+
         try:
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=self._log_file or subprocess.PIPE,
+                stderr=subprocess.STDOUT if self._log_file else subprocess.PIPE,
                 text=True,
                 cwd=str(self.zapret_dir),
             )
@@ -224,15 +232,24 @@ class WinwsRunner:
         # Даем процессу 350мс проверить инициализацию драйвера WinDivert и загрузку Lua
         time.sleep(0.35)
         if self.process.poll() is not None:
-            out, err = self.process.communicate()
+            if self._log_file and not self._log_file.closed:
+                self._log_file.close()
+            err_text = ""
+            if self._log_path.is_file():
+                err_text = self._log_path.read_text(encoding="utf-8", errors="replace").strip()
             _ACTIVE_RUNNERS.discard(self)
             rc = self.process.returncode
             self.process = None
-            raise RuntimeError(f"Сбой старта {Path(cmd[0]).name} (код {rc}): {err.strip() or out.strip()}")
+            raise RuntimeError(f"Сбой старта {Path(cmd[0]).name} (код {rc}): {err_text}")
 
     def stop(self) -> None:
         """Останавливает winws2.exe, гарантируя закрытие дескриптора WinDivert."""
         _ACTIVE_RUNNERS.discard(self)
+        if self._log_file and not self._log_file.closed:
+            with contextlib.suppress(Exception):
+                self._log_file.close()
+        self._log_file = None
+
         if self.process is None:
             return
 
@@ -241,8 +258,10 @@ class WinwsRunner:
 
         if p.poll() is not None:
             if p.returncode != 0:
-                out, err = p.communicate()
-                logger.warning("winws завершился досрочно с кодом %s: %s", p.returncode, err.strip() or out.strip())
+                err_text = ""
+                if self._log_path.is_file():
+                    err_text = self._log_path.read_text(encoding="utf-8", errors="replace").strip()
+                logger.warning("winws завершился досрочно с кодом %s: %s", p.returncode, err_text)
             return
 
         p.terminate()

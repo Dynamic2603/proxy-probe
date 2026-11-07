@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import copy
 import json
 import logging
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -56,12 +58,19 @@ def save_ratings(result: AntidpiBenchmarkResult, path: Path | None = None) -> No
     tmp.replace(p)
 
 
-def select_dead_servers(servers: list[Server], limit: int = 15) -> list[Server]:
+def select_dead_servers(
+    servers: list[Server],
+    limit: int = 15,
+    verify_tcp: bool = False,
+    tcp_timeout: float = 0.35,
+    tcp_concurrency: int = 30,
+) -> list[Server]:
     """Отбирает уникальные по хосту серверы, упавшие по сетевым причинам (L4/TLS).
 
     Строго исключает геоблоки Google (RESULT_BLOCK), так как Zapret бессилен против санкций сервиса.
     Исключает чистые UDP-протоколы (hysteria2/wireguard), для которых Winws TCP-стратегии неприменимы.
     Приоритет отдается узлам с признаками блокировки DPI (падение туннеля, preflight drop, DEGRADED).
+    При verify_tcp=True быстро отсекает хосты с закрытыми/неотвечающими портами на L4.
     """
     candidates: list[Server] = []
     seen_hosts: set[str] = set()
@@ -82,7 +91,10 @@ def select_dead_servers(servers: list[Server], limit: int = 15) -> list[Server]:
 
     def _rank(srv: Server) -> tuple[int, int]:
         note = (srv.note or "").lower()
-        if "preflight" in note or "туннель" in note or "reset" in note or "handshake" in note:
+        if "tcp:" in note or "хост не отвечает" in note or "dns" in note:
+            # Узлы с подтвержденным падением на L4 имеют минимальный приоритет
+            pri = 9
+        elif "preflight" in note or "туннель" in note or "reset" in note or "handshake" in note:
             pri = 0
         elif srv.state == "DEGRADED":
             pri = 1
@@ -91,7 +103,33 @@ def select_dead_servers(servers: list[Server], limit: int = 15) -> list[Server]:
         return (pri, srv.index)
 
     candidates.sort(key=_rank)
-    return candidates[:limit]
+
+    if not verify_tcp or not candidates:
+        return candidates[:limit]
+
+    def _is_tcp_alive(srv: Server) -> bool:
+        try:
+            with socket.create_connection((srv.server, srv.server_port), timeout=tcp_timeout):
+                return True
+        except Exception:
+            return False
+
+    chunk_size = max(limit * 2, 30)
+    verified: list[Server] = []
+    for idx in range(0, min(len(candidates), 300), chunk_size):
+        chunk = candidates[idx : idx + chunk_size]
+        workers = min(len(chunk), tcp_concurrency)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_is_tcp_alive, chunk))
+        for srv, alive in zip(chunk, results, strict=True):
+            if alive:
+                verified.append(srv)
+                if len(verified) >= limit:
+                    break
+        if len(verified) >= limit:
+            break
+
+    return verified
 
 
 def calculate_strategy_score(rescued: int, total: int, avg_latency: int) -> int:

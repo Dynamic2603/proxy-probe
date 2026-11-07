@@ -50,10 +50,11 @@ def ensure_zapret_binaries(
     """Скачивает и распаковывает официальный zapret-win-bundle от bol-van с проверкой SHA-256."""
     target_dir = zapret_dir or default_zapret_dir()
     winws_exe = target_dir / "winws.exe"
+    cygwin_dll = target_dir / "cygwin1.dll"
     divert_dll = target_dir / "WinDivert.dll"
     divert_sys = target_dir / "WinDivert64.sys"
 
-    if winws_exe.is_file() and divert_dll.is_file() and divert_sys.is_file():
+    if winws_exe.is_file() and cygwin_dll.is_file() and divert_dll.is_file() and divert_sys.is_file():
         return target_dir
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -75,21 +76,15 @@ def ensure_zapret_binaries(
     with zipfile.ZipFile(zip_path, "r") as z:
         for member in z.infolist():
             filename = member.filename
-            # Ищем файлы в zapret-winws/
-            if "zapret-winws/winws.exe" in filename:
-                with z.open(member) as src, open(winws_exe, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            elif "zapret-winws/WinDivert.dll" in filename:
-                with z.open(member) as src, open(divert_dll, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            elif "zapret-winws/WinDivert64.sys" in filename:
-                with z.open(member) as src, open(divert_sys, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            elif "zapret-winws/lua/" in filename and not member.is_dir():
-                rel_name = Path(filename).name
-                lua_dir = target_dir / "lua"
-                lua_dir.mkdir(parents=True, exist_ok=True)
-                with z.open(member) as src, open(lua_dir / rel_name, "wb") as dst:
+            if member.is_dir():
+                continue
+            marker = "zapret-winws/"
+            idx = filename.find(marker)
+            if idx != -1:
+                rel_path = filename[idx + len(marker) :]
+                dest_path = target_dir / rel_path
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as src, open(dest_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
 
     with contextlib.suppress(OSError):

@@ -101,6 +101,7 @@ def test_winws_runner_lifecycle(tmp_path: Path) -> None:
 
 def test_ensure_zapret_binaries_already_exists(tmp_path: Path) -> None:
     (tmp_path / "winws.exe").write_text("exe", encoding="utf-8")
+    (tmp_path / "cygwin1.dll").write_text("dll", encoding="utf-8")
     (tmp_path / "WinDivert.dll").write_text("dll", encoding="utf-8")
     (tmp_path / "WinDivert64.sys").write_text("sys", encoding="utf-8")
 

@@ -13,13 +13,14 @@ import dataclasses
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from .cache import ResultCache, default_cache_path
 from .engines import alloc_port, ensure_binaries
-from .models import DEFAULT_TTLS, Server
+from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
 from .orchestrator import (
     dedupe_servers,
     fetch_subscription,
@@ -29,7 +30,7 @@ from .orchestrator import (
     run_dir,
 )
 from .parsers import parse_subscription
-from .prober import AGY_PRINT_TIMEOUT_DEFAULT, get_default_agy_bin, run_probe
+from .prober import AGY_PRINT_TIMEOUT_DEFAULT, ProcessRegistry, get_default_agy_bin, run_probe
 from .reporter import write_import_file, write_report
 from .throne import (
     default_throne_dir,
@@ -246,7 +247,17 @@ def _probe_worker(
     timeouts: dict[str, float],
     agy_bin: str,
     print_timeout: str,
+    stop_event: threading.Event | None = None,
+    registry: ProcessRegistry | None = None,
 ) -> dict[str, Any]:
+    if stop_event is not None and stop_event.is_set():
+        return {
+            "result": RESULT_DEAD,
+            "country": "",
+            "ip_out": "",
+            "latency_ms": 0,
+            "note": "проверка отменена",
+        }
     port = alloc_port()
     return run_probe(
         bin_path,
@@ -257,6 +268,8 @@ def _probe_worker(
         timeouts,
         agy_bin=agy_bin,
         print_timeout=print_timeout,
+        stop_event=stop_event,
+        registry=registry,
     )
 
 
@@ -266,42 +279,78 @@ def _execute_probe_pool(
     timeouts: dict[str, float],
     ctx: RuntimeContext,
     print_timeout: str,
-) -> None:
+) -> tuple[int, bool]:
     if not to_probe:
-        return
+        return 0, False
 
     run_root = run_dir()
+    registry = ProcessRegistry()
+    stop_event = threading.Event()
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
     futures: dict[concurrent.futures.Future[Any], Server] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        for s in to_probe:
-            bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
-            fut = ex.submit(
-                _probe_worker,
-                bin_path,
-                s.engine == "xray",
-                s.import_obj,
-                run_root,
-                timeouts,
-                ctx.agy_bin,
-                print_timeout,
-            )
-            futures[fut] = s
+    completed_count = 0
+    interrupted = False
 
-        total = len(to_probe)
-        try:
-            for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
-                s = futures[fut]
+    for s in to_probe:
+        bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
+        fut = ex.submit(
+            _probe_worker,
+            bin_path,
+            s.engine == "xray",
+            s.import_obj,
+            run_root,
+            timeouts,
+            ctx.agy_bin,
+            print_timeout,
+            stop_event=stop_event,
+            registry=registry,
+        )
+        futures[fut] = s
+
+    total = len(to_probe)
+    try:
+        for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+            s = futures[fut]
+            try:
                 probe_res: dict[str, Any] = fut.result()
-                s.result = probe_res["result"]
-                s.country = probe_res.get("country", "")
-                s.ip_out = probe_res.get("ip_out", "")
-                s.latency_ms = probe_res.get("latency_ms", 0)
-                s.note = probe_res.get("note", "")
+            except Exception as e:
+                if stop_event.is_set():
+                    break
+                s.result = RESULT_UNKNOWN
+                s.note = f"ошибка: {e}"
+                completed_count += 1
                 print_progress_row(s, i, total)
-        except KeyboardInterrupt:
-            print("\nПрерывание пользователем (Ctrl+C). Остановка задач...")
+                continue
+
+            if stop_event.is_set():
+                break
+
+            s.result = probe_res["result"]
+            s.country = probe_res.get("country", "")
+            s.ip_out = probe_res.get("ip_out", "")
+            s.latency_ms = probe_res.get("latency_ms", 0)
+            s.note = probe_res.get("note", "")
+            completed_count += 1
+            print_progress_row(s, i, total)
+    except KeyboardInterrupt:
+        interrupted = True
+        msg = (
+            f"\n[bold yellow]Прерывание (Ctrl+C). Остановка задач "
+            f"(завершено {completed_count}/{total})...[/bold yellow]"
+        )
+        console.print(msg)
+        stop_event.set()
+        registry.kill_all()
+        ex.shutdown(wait=False, cancel_futures=True)
+    finally:
+        if interrupted:
+            stop_event.set()
+            registry.kill_all()
             ex.shutdown(wait=False, cancel_futures=True)
-            raise
+        else:
+            ex.shutdown(wait=True)
+
+    return completed_count, interrupted
 
 
 def _finalize_and_report(
@@ -311,12 +360,18 @@ def _finalize_and_report(
     warnings: list[str],
     dt: float,
     cached_counts: dict[str, int],
+    interrupted: bool = False,
 ) -> None:
+    if interrupted:
+        warnings = list(warnings)
+        warnings.append("Проверка была прервана пользователем (Ctrl+C). Часть серверов не проверена.")
+
     if ctx.cache:
         for s in servers:
             ctx.cache.enrich_from_server(s)
         for s in to_probe:
-            ctx.cache.update_from_server(s)
+            if s.result:
+                ctx.cache.update_from_server(s)
         ctx.cache.save()
         console.print(f"[dim]Кэш обновлён: {ctx.cache_path} (записей: {len(ctx.cache.entries)})[/dim]")
 
@@ -382,7 +437,7 @@ def main() -> None:
         print_timeout = f"{int(args.timeout)}s"
     t0 = time.time()
 
-    _execute_probe_pool(
+    _completed_count, interrupted = _execute_probe_pool(
         to_probe=to_probe,
         jobs=args.jobs,
         timeouts=timeouts,
@@ -398,7 +453,12 @@ def main() -> None:
         warnings=warnings,
         dt=dt,
         cached_counts=cached_counts,
+        interrupted=interrupted,
     )
+
+    if interrupted:
+        sys.exit(130)
+
     pause_on_exit(args.no_pause)
 
 
@@ -408,7 +468,7 @@ def cli_entrypoint() -> None:
     except KeyboardInterrupt:
         sys.exit(130)
     except SystemExit as exc:
-        if exc.code not in (0, None):
+        if exc.code not in (0, 130, None):
             if isinstance(exc.code, str):
                 print(f"\nОшибка: {exc.code}", file=sys.stderr)
             if "--no-pause" not in sys.argv:

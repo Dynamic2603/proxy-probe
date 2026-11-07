@@ -25,11 +25,13 @@ def write_report(
     cached_counts: dict[str, int] | None = None,
     cache_note: str = "",
 ) -> None:
-    counts = Counter(s.result for s in servers)
+    counts = Counter(s.result for s in servers if s.result)
+    tested_count = sum(1 for s in servers if s.result)
+    server_stat = f"{tested_count} из {len(servers)} (прервано)" if tested_count < len(servers) else f"{len(servers)}"
     lines: list[str] = [
         "# Отчёт о проверке серверов подписок (работа с agy / Gemini)\n",
         f"- Дата: {_dt.datetime.now(_dt.UTC).astimezone().isoformat(timespec='seconds')}",
-        f"- Проверено серверов: {len(servers)}",
+        f"- Проверено серверов: {server_stat}",
     ]
     if cached_counts:
         hit_txt = ", ".join(f"{k} = {v}" for k, v in cached_counts.items() if v)
@@ -63,7 +65,7 @@ def write_report(
         name = (s.name or "").replace("|", "\\|")[:60]
         note = (s.note or "").replace("|", "\\|").replace("\n", " ").strip()
         lines.append(
-            f"| {s.index} | {s.result} | {s.group_name} | {s.engine} | {s.server}:{s.server_port} | "
+            f"| {s.index} | {s.result or '—'} | {s.group_name} | {s.engine} | {s.server}:{s.server_port} | "
             f"{s.country} | {s.ip_out} | {s.latency_ms} | {name} | {note} |"
         )
     report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,8 @@ def format_result(res: str) -> str:
         return "[dim red]DEAD[/dim red]"
     if res == RESULT_UNKNOWN:
         return "[bold yellow]UNKNOWN[/bold yellow]"
+    if not res:
+        return "[dim]—[/dim]"
     return res
 
 
@@ -112,10 +114,13 @@ def print_summary_panel(
     nx: int,
     elapsed_s: float,
 ) -> None:
-    counts = Counter(s.result for s in servers)
-    lines: list[str] = [
-        f"[bold]Всего проверено:[/] {len(servers)} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"
-    ]
+    counts = Counter(s.result for s in servers if s.result)
+    tested_count = sum(1 for s in servers if s.result)
+    if tested_count < len(servers):
+        stat = f"{tested_count} из {len(servers)} (прервано)"
+        lines: list[str] = [f"[bold]Проверено серверов:[/] {stat} за [cyan]{elapsed_s:.1f} с[/cyan]"]
+    else:
+        lines: list[str] = [f"[bold]Всего проверено:[/] {len(servers)} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"]
 
     breakdown = []
     if counts.get(RESULT_OK):

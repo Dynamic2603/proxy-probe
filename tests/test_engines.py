@@ -162,5 +162,16 @@ def test_download_and_verify_archive_cleanup_on_error(tmp_path: Path, monkeypatc
     assert not dest.with_suffix(".zip.part").exists()
 
 
+def test_wait_port_with_stop_event() -> None:
+    import threading
+
+    from proxy_probe.engines import wait_port
+
+    stop_event = threading.Event()
+    stop_event.set()
+    assert wait_port(21001, None, timeout=10.0, stop_event=stop_event) is False
+
+
+
 
 

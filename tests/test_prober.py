@@ -65,3 +65,73 @@ def test_get_default_agy_bin() -> None:
 def test_preflight_check_import() -> None:
     """Ensure preflight_check is importable and callable."""
     assert callable(prober.preflight_check)
+
+
+def test_process_registry_basic() -> None:
+    import subprocess
+    import sys
+
+    reg = prober.ProcessRegistry()
+    assert reg.count == 0
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        reg.register(proc)
+        assert reg.count == 1
+        reg.unregister(proc)
+        assert reg.count == 0
+    finally:
+        proc.kill()
+        proc.wait(timeout=2)
+
+
+def test_process_registry_kill_all() -> None:
+    import subprocess
+    import sys
+
+    reg = prober.ProcessRegistry()
+    p1 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    p2 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+
+    reg.register(p1)
+    reg.register(p2)
+    assert reg.count == 2
+
+    reg.kill_all()
+    assert reg.count == 0
+
+    p1.wait(timeout=2)
+    p2.wait(timeout=2)
+    assert p1.poll() is not None
+    assert p2.poll() is not None
+
+
+def test_agy_probe_with_stop_event() -> None:
+    import threading
+
+    stop_event = threading.Event()
+    stop_event.set()
+
+    out, rc = prober.agy_probe(12345, "agy", "5s", 10.0, stop_event=stop_event)
+    assert rc == -1
+    assert out == ""
+
+
+def test_run_probe_with_stop_event(tmp_path: prober.Path) -> None:
+    import threading
+
+    stop_event = threading.Event()
+    stop_event.set()
+
+    res = prober.run_probe(
+        "dummy_engine",
+        False,
+        {"type": "direct"},
+        21999,
+        tmp_path,
+        {"start": 5.0, "probe": 5.0},
+        stop_event=stop_event,
+    )
+    assert res["result"] == RESULT_DEAD
+    assert res["latency_ms"] == 0
+    assert "проверка отменена" in res["note"]

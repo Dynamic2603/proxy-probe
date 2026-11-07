@@ -49,6 +49,16 @@ def format_score_display(score: int, state: str = STATE_ACTIVE) -> str:
 DEFAULT_TTLS = {RESULT_OK: 3 * 86400, RESULT_BLOCK: 7 * 86400, RESULT_DEAD: 86400}
 RESULT_PRIORITIES = {RESULT_BLOCK: 3, RESULT_OK: 2, RESULT_DEAD: 1, RESULT_UNKNOWN: 0}
 
+FINGERPRINT_PRIORITIES: dict[str, int] = {
+    "chrome": 10,
+    "firefox": 8,
+    "safari": 7,
+    "edge": 6,
+    "ios": 5,
+    "android": 4,
+    "qq": 2,
+}
+
 BLOCK_MARKERS = ["User location is not supported"]
 DEAD_PATTERNS = [
     "connection refused",
@@ -157,6 +167,7 @@ class Server:
     ingress_country_code: str = ""
     ingress_ip: str = ""
     _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
+    _endpoint_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _sni: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _fingerprint: str | None = dataclasses.field(default=None, repr=False, compare=False)
@@ -300,20 +311,14 @@ class Server:
 
         return head
 
-    @property
-    def config_identity(self) -> str:
-        """Канонический идентификатор конфигурации узла (SSOT).
+    def _parse_config_parts(self) -> tuple[str, str, str, str, str, str, str, str, str, str]:
+        """Парсит нормализованные компоненты конфигурации (SSOT).
 
-        Нормализует диалекты Xray и sing-box в единый канонический ключ:
-        protocol : host : port : cred : sni : reality_pk : fingerprint : flow : alpn : path
+        Возвращает:
+        (proto, host, port, cred, sni, reality_pk, fp, flow, alpn_str, path)
         """
-        if self._config_identity is not None:
-            return self._config_identity
-
         if not self.import_obj or not isinstance(self.import_obj, dict):
-            res = f"unknown:{self.server}:{self.server_port}"
-            self._config_identity = res
-            return res
+            return ("unknown", str(self.server), str(self.server_port), "", "", "", "", "", "", "")
 
         obj = self.import_obj
         proto = str(obj.get("type") or obj.get("protocol") or "").strip().lower()
@@ -391,9 +396,54 @@ class Server:
                     if p and not path:
                         path = str(p).strip()
 
-        res = f"{proto}:{self.server}:{self.server_port}:{cred}:{sni}:{reality_pk}:{fp}:{flow}:{alpn_str}:{path}"
+        return (proto, str(self.server), str(self.server_port), cred, sni, reality_pk, fp, flow, alpn_str, path)
+
+    @property
+    def config_identity(self) -> str:
+        """Канонический идентификатор конфигурации узла (SSOT).
+
+        Нормализует диалекты Xray и sing-box в единый канонический ключ:
+        protocol : host : port : cred : sni : reality_pk : fingerprint : flow : alpn : path
+        """
+        if self._config_identity is not None:
+            return self._config_identity
+        parts = self._parse_config_parts()
+        res = ":".join(parts)
         self._config_identity = res
         return res
+
+    @property
+    def endpoint_identity(self) -> str:
+        """Канонический идентификатор эндпоинта/сервиса без учета отпечатка uTLS (SSOT).
+
+        Нормализует диалекты Xray и sing-box в единый ключ сервиса:
+        protocol : host : port : cred : sni : reality_pk : flow : alpn : path
+        """
+        if self._endpoint_identity is not None:
+            return self._endpoint_identity
+        proto, host, port, cred, sni, reality_pk, _fp, flow, alpn_str, path = self._parse_config_parts()
+        res = f"{proto}:{host}:{port}:{cred}:{sni}:{reality_pk}:{flow}:{alpn_str}:{path}"
+        self._endpoint_identity = res
+        return res
+
+    @property
+    def export_rank(self) -> tuple[int, int, int, int, int, int]:
+        """Критерий сравнительной ценности узла при экспорте в подписку (SSOT).
+
+        Иерархия (от более важных к менее важным):
+        1. Состояние: ACTIVE (1) строго выше DEGRADED (0).
+        2. Скор надежности (0..100): стабильные узлы выше (score).
+        3. Задержка: меньший пинг предпочтительнее (-latency_ms).
+        4. Свежесть источника: живая проверка (fresh/db = 1) предпочтительнее исторического кэша (cache = 0).
+        5. Вес TLS-отпечатка: популярные браузерные отпечатки (Chrome > Firefox > ...) выше экзотических.
+        6. Порядок подписки: сохранение оригинальной позиции (-index).
+        """
+        state_weight = 1 if self.state == STATE_ACTIVE else 0
+        lat_weight = -self.latency_ms if self.latency_ms > 0 else -999999
+        source_weight = 0 if self.source == "cache" else 1
+        fp_name = (self.fingerprint or "").strip().lower()
+        fp_rank = FINGERPRINT_PRIORITIES.get(fp_name, 1 if fp_name else 0)
+        return (state_weight, self.score, lat_weight, source_weight, fp_rank, -self.index)
 
     @property
     def cache_key(self) -> str:

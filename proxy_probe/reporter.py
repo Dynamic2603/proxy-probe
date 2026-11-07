@@ -4,6 +4,7 @@ import datetime as _dt
 import json
 import shutil
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -119,6 +120,23 @@ def write_report(
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def deduplicate_by_endpoint(servers: Iterable[Server]) -> list[Server]:
+    """Отбирает ровно один лучший рабочий профиль для каждого уникального эндпоинта (SRP).
+
+    Для конфигураций, идентичных по протоколу, хосту, порту, ключам и SNI, но различающихся
+    только отпечатком uTLS (fingerprint), сохраняется только сильнейший профиль по Server.export_rank.
+    """
+    best_by_endpoint: dict[str, Server] = {}
+    for s in servers:
+        if not s.is_exportable or not s.import_obj:
+            continue
+        key = s.endpoint_identity
+        current = best_by_endpoint.get(key)
+        if current is None or s.export_rank > current.export_rank:
+            best_by_endpoint[key] = s
+    return list(best_by_endpoint.values())
+
+
 def write_import_file(
     cache: ResultCache | None,
     path: Path,
@@ -132,19 +150,15 @@ def write_import_file(
         obj["tag"] = srv.formatted_tag
         return obj
 
-    seen_keys: set[str] = set()
-    ok_servers: list[Server] = []
+    candidates: list[Server] = []
 
     # 1. Серверы активного пула в UI-порядке (s.index)
     if fallback_servers:
         for s in fallback_servers:
             if s.is_exportable and s.import_obj:
-                ok_servers.append(s)
-                seen_keys.add(s.config_identity)
-                seen_keys.add(s.cache_key)
-                seen_keys.add(s.host_port)
+                candidates.append(s)
 
-    # 2. Дополнительные валидные серверы из кэша, если они не были в активном пуле
+    # 2. Дополнительные валидные серверы из кэша
     if cache is not None:
         for entry_key, entry in cache.entries.items():
             state = str(entry.get("state", ""))
@@ -190,18 +204,18 @@ def write_import_file(
                 state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
                 consecutive_fails=int(entry.get("consecutive_fails", 0)),
             )
-            if s.config_identity in seen_keys or s.cache_key in seen_keys or s.host_port in seen_keys:
-                continue
-            seen_keys.add(s.config_identity)
-            seen_keys.add(s.cache_key)
-            seen_keys.add(s.host_port)
-            ok_servers.append(s)
+            candidates.append(s)
+
+    # Дедупликация по сервисному эндпоинту: 1 лучший профиль на узел
+    ok_servers = deduplicate_by_endpoint(candidates)
 
     ok_servers.sort(
         key=lambda s: (
             0 if s.state == STATE_ACTIVE else 1,
             -s.score,
             s.latency_ms if s.latency_ms > 0 else 99999,
+            -s.export_rank[4],  # fp_rank descending
+            s.index,
         )
     )
 

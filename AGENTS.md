@@ -80,4 +80,10 @@
     - Управление предфильтром: CLI-флаги `--no-geo-precheck`, `--geo-precheck-timeout` (по умолчанию 2.5с).
     - Ортогональный статус веб-доступности: `--check-web` тестирует `gemini.google.com` на наличие интерактивного челленджа Google CAPTCHA (`google.com/sorry`).
     - Семантика и SSOT: капча на вебе не является блокировкой API (`AGY-OK`), сервер не дисквалифицируется, а получает информационный атрибут `web_status: "captcha"` и бейдж `[captcha]` в `formatted_tag` (`proxy-ok.txt`), консольной таблице и отчётах.
+16. **Дедупликация профилей по TLS-отпечаткам при экспорте (uTLS Fingerprint Deduplication)**:
+    - Разграничение семантики: `host_port` (физический L4-сокет для предфильтра), `config_identity` (полная конфигурация с отпечатком для кэша `results.json`) и `endpoint_identity` (служба прокси без учёта симуляции браузера для подписки `proxy-ok.txt`).
+    - SSOT и DRY: единый метод `Server._parse_config_parts()` извлекает канонический кортеж параметров, используемый как для `config_identity`, так и для `endpoint_identity`.
+    - Иерархия отбора лучшего профиля (`Server.export_rank`): объективные замеры имеют абсолютный приоритет (`ACTIVE` > `DEGRADED`, больший `score`, меньший `latency_ms`, свежая проверка `fresh/db` > старый `cache`). Приоритет отпечатка (`FINGERPRINT_PRIORITIES`: `chrome` > `firefox` > `safari` > ...) используется исключительно как финальный тай-брейкер для защиты от эвристик DPI.
+    - Изоляция ответственности (SRP): чистая функция `deduplicate_by_endpoint` в `proxy_probe/reporter.py` отбирает ровно один лучший рабочий профиль на каждый эндпоинт, устраняя клоны одного сервера с разными `fp` в `proxy-ok.txt` и снижая нагрузку на Throne.
+
 

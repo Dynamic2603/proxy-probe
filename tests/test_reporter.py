@@ -6,7 +6,7 @@ from pathlib import Path
 
 from proxy_probe.cache import ResultCache
 from proxy_probe.models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, Server
-from proxy_probe.reporter import write_import_file, write_report
+from proxy_probe.reporter import deduplicate_by_endpoint, write_import_file, write_report
 
 
 def test_write_report(tmp_path: Path) -> None:
@@ -348,4 +348,247 @@ def test_write_import_file_never_exports_agy_block(tmp_path: Path) -> None:
     sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_block])
     assert sb_cnt == 0
     assert xr_cnt == 0
+
+
+def test_deduplicate_by_endpoint_fingerprints() -> None:
+    from proxy_probe.models import STATE_ACTIVE
+
+    def make_server(fp: str, idx: int) -> Server:
+        return Server(
+            group_id=1,
+            group_name="G1",
+            name=f"s_{fp}",
+            engine="sing-box",
+            server="novonl.subv.ru",
+            server_port=443,
+            import_obj={
+                "type": "vless",
+                "server": "novonl.subv.ru",
+                "server_port": 443,
+                "uuid": "test-uuid",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                    "enabled": True,
+                    "server_name": "golos.mail.ru",
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {"enabled": True, "public_key": "test-pk"},
+                },
+            },
+            source="fresh",
+            index=idx,
+            result=RESULT_OK,
+            score=70,
+            state=STATE_ACTIVE,
+            latency_ms=80,
+        )
+
+    s_qq = make_server("qq", 1)
+    s_firefox = make_server("firefox", 2)
+    s_chrome = make_server("chrome", 3)
+
+    # Подаем в разном порядке, Chrome должен победить по весу отпечатка
+    res1 = deduplicate_by_endpoint([s_qq, s_firefox, s_chrome])
+    assert len(res1) == 1
+    assert res1[0].fingerprint == "chrome"
+
+    res2 = deduplicate_by_endpoint([s_chrome, s_qq, s_firefox])
+    assert len(res2) == 1
+    assert res2[0].fingerprint == "chrome"
+
+
+def test_deduplicate_quality_overrides_fingerprint() -> None:
+    from proxy_probe.models import STATE_ACTIVE
+
+    # Firefox со скором 95 и меньшей задержкой должен победить Chrome со скором 70
+    s_firefox = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_firefox",
+        engine="sing-box",
+        server="novonl.subv.ru",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "novonl.subv.ru",
+            "server_port": 443,
+            "uuid": "test-uuid",
+            "tls": {"utls": {"fingerprint": "firefox"}},
+        },
+        source="fresh",
+        index=1,
+        result=RESULT_OK,
+        score=95,
+        state=STATE_ACTIVE,
+        latency_ms=60,
+    )
+    s_chrome = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_chrome",
+        engine="sing-box",
+        server="novonl.subv.ru",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "novonl.subv.ru",
+            "server_port": 443,
+            "uuid": "test-uuid",
+            "tls": {"utls": {"fingerprint": "chrome"}},
+        },
+        source="fresh",
+        index=2,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        latency_ms=150,
+    )
+
+    res = deduplicate_by_endpoint([s_chrome, s_firefox])
+    assert len(res) == 1
+    assert res[0].fingerprint == "firefox"
+    assert res[0].score == 95
+
+
+def test_deduplicate_active_overrides_degraded() -> None:
+    from proxy_probe.models import STATE_ACTIVE, STATE_DEGRADED
+
+    # Узел ACTIVE с отпечатком qq должен победить узел DEGRADED с chrome
+    s_chrome_deg = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_chrome",
+        engine="sing-box",
+        server="novonl.subv.ru",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "novonl.subv.ru",
+            "server_port": 443,
+            "uuid": "test-uuid",
+            "tls": {"utls": {"fingerprint": "chrome"}},
+        },
+        source="fresh",
+        index=1,
+        result=RESULT_DEAD,
+        score=40,
+        state=STATE_DEGRADED,
+        consecutive_fails=1,
+        latency_ms=100,
+    )
+    s_qq_active = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_qq",
+        engine="sing-box",
+        server="novonl.subv.ru",
+        server_port=443,
+        import_obj={
+            "type": "vless",
+            "server": "novonl.subv.ru",
+            "server_port": 443,
+            "uuid": "test-uuid",
+            "tls": {"utls": {"fingerprint": "qq"}},
+        },
+        source="fresh",
+        index=2,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        latency_ms=80,
+    )
+
+    res = deduplicate_by_endpoint([s_chrome_deg, s_qq_active])
+    assert len(res) == 1
+    assert res[0].fingerprint == "qq"
+    assert res[0].state == STATE_ACTIVE
+
+
+def test_distinct_ports_not_deduplicated() -> None:
+    from proxy_probe.models import STATE_ACTIVE
+
+    # Узлы на одном хосте, но разных портах — это разные службы, они не должны удаляться
+    s_p1 = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_5443",
+        engine="sing-box",
+        server="84.252.100.138",
+        server_port=5443,
+        import_obj={"type": "hysteria2", "server": "84.252.100.138", "server_port": 5443},
+        source="fresh",
+        index=1,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        latency_ms=75,
+    )
+    s_p2 = Server(
+        group_id=1,
+        group_name="G1",
+        name="s_2443",
+        engine="sing-box",
+        server="84.252.100.138",
+        server_port=2443,
+        import_obj={"type": "hysteria2", "server": "84.252.100.138", "server_port": 2443},
+        source="fresh",
+        index=2,
+        result=RESULT_OK,
+        score=70,
+        state=STATE_ACTIVE,
+        latency_ms=80,
+    )
+
+    res = deduplicate_by_endpoint([s_p1, s_p2])
+    assert len(res) == 2
+    ports = {s.server_port for s in res}
+    assert ports == {5443, 2443}
+
+
+def test_write_import_file_fingerprint_deduplication(tmp_path: Path) -> None:
+    from proxy_probe.models import STATE_ACTIVE
+
+    import_file = tmp_path / "dedup-ok.txt"
+
+    def make_s(fp: str, idx: int) -> Server:
+        return Server(
+            group_id=1,
+            group_name="G1",
+            name=f"s_{fp}",
+            engine="sing-box",
+            server="novonl.subv.ru",
+            server_port=443,
+            import_obj={
+                "type": "vless",
+                "server": "novonl.subv.ru",
+                "server_port": 443,
+                "uuid": "test-uuid",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                    "enabled": True,
+                    "server_name": "golos.mail.ru",
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {"enabled": True, "public_key": "test-pk"},
+                },
+            },
+            source="fresh",
+            index=idx,
+            result=RESULT_OK,
+            score=70,
+            state=STATE_ACTIVE,
+            latency_ms=85,
+        )
+
+    s1 = make_s("qq", 1)
+    s2 = make_s("firefox", 2)
+    s3 = make_s("chrome", 3)
+
+    sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s1, s2, s3])
+    assert sb_cnt == 1
+    assert xr_cnt == 0
+
+    content = import_file.read_text(encoding="utf-8").strip()
+    data = json.loads(content)
+    assert len(data) == 1
+    assert data[0]["tls"]["utls"]["fingerprint"] == "chrome"
+    assert "fp: chrome" in data[0]["tag"]
 

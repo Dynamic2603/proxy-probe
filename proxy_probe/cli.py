@@ -15,8 +15,11 @@ import shutil
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from tqdm import tqdm
 
 from .cache import ResultCache, default_cache_path
 from .engines import alloc_port, ensure_binaries
@@ -41,7 +44,8 @@ from .throne import (
 )
 from .ui import (
     console,
-    print_progress_row,
+    format_cached_counters,
+    format_live_counters,
     print_results_table,
     print_summary_panel,
 )
@@ -62,9 +66,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"число параллельных проверок (по умолчанию CPU = {default_jobs})",
     )
     ap.add_argument("--subset", type=int, default=0, help="проверить только первые N серверов (0 = все)")
-    ap.add_argument(
-        "--group", type=int, action="append", default=[], help="id группы (можно несколько; иначе — выбор)"
-    )
+    ap.add_argument("--group", type=int, action="append", default=[], help="id группы (можно несколько; иначе — выбор)")
     ap.add_argument("--no-fetch", action="store_true", help="не обновлять подписки, использовать данные из БД Throne")
     ap.add_argument("--timeout", type=float, default=35.0, help="секунд таймаут на одну проверку (по умолчанию 35)")
     ap.add_argument(
@@ -279,10 +281,16 @@ def _execute_probe_pool(
     timeouts: dict[str, float],
     ctx: RuntimeContext,
     print_timeout: str,
+    cached_counts: dict[str, int] | None = None,
 ) -> tuple[int, bool]:
     if not to_probe:
         return 0, False
 
+    cache_line = format_cached_counters(cached_counts or {})
+    if cache_line:
+        console.print(f"[dim]{cache_line}[/dim]")
+
+    live_counts = Counter(cached_counts or {})
     run_root = run_dir()
     registry = ProcessRegistry()
     stop_event = threading.Event()
@@ -308,8 +316,16 @@ def _execute_probe_pool(
         futures[fut] = s
 
     total = len(to_probe)
+    pbar = tqdm(
+        total=total,
+        desc="Проверка",
+        unit="srv",
+        dynamic_ncols=True,
+    )
+    pbar.set_postfix_str(format_live_counters(live_counts), refresh=True)
+
     try:
-        for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+        for _i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
             s = futures[fut]
             try:
                 probe_res: dict[str, Any] = fut.result()
@@ -319,7 +335,9 @@ def _execute_probe_pool(
                 s.result = RESULT_UNKNOWN
                 s.note = f"ошибка: {e}"
                 completed_count += 1
-                print_progress_row(s, i, total)
+                live_counts[s.result] += 1
+                pbar.set_postfix_str(format_live_counters(live_counts), refresh=False)
+                pbar.update(1)
                 continue
 
             if stop_event.is_set():
@@ -331,7 +349,9 @@ def _execute_probe_pool(
             s.latency_ms = probe_res.get("latency_ms", 0)
             s.note = probe_res.get("note", "")
             completed_count += 1
-            print_progress_row(s, i, total)
+            live_counts[s.result] += 1
+            pbar.set_postfix_str(format_live_counters(live_counts), refresh=False)
+            pbar.update(1)
     except KeyboardInterrupt:
         interrupted = True
         msg = (
@@ -343,6 +363,7 @@ def _execute_probe_pool(
         registry.kill_all()
         ex.shutdown(wait=False, cancel_futures=True)
     finally:
+        pbar.close()
         if interrupted:
             stop_event.set()
             registry.kill_all()
@@ -443,6 +464,7 @@ def main() -> None:
         timeouts=timeouts,
         ctx=ctx,
         print_timeout=print_timeout,
+        cached_counts=cached_counts,
     )
     dt = time.time() - t0
 

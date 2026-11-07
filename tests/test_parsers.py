@@ -145,4 +145,3 @@ def test_extract_host_port_wireguard() -> None:
     host, port = extract_host_port(wg_obj)
     assert host == "10.0.0.1"
     assert port == 51820
-

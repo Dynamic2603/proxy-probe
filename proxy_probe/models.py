@@ -13,16 +13,38 @@ RESULT_PRIORITIES = {RESULT_BLOCK: 3, RESULT_OK: 2, RESULT_DEAD: 1, RESULT_UNKNO
 
 BLOCK_MARKERS = ["User location is not supported"]
 DEAD_PATTERNS = [
-    "connection refused", "i/o timeout", "dial tcp", "proxy connect", "EOF",
-    "tls: handshake", "tls: bad certificate", "tls: failed to verify",
+    "connection refused",
+    "i/o timeout",
+    "dial tcp",
+    "proxy connect",
+    "EOF",
+    "tls: handshake",
+    "tls: bad certificate",
+    "tls: failed to verify",
     "tls: first record does not look like a TLS handshake",
-    "context deadline exceeded", "cannot connect", "no route", "unreachable",
-    "forcibly closed", "connection reset",
+    "context deadline exceeded",
+    "cannot connect",
+    "no route",
+    "unreachable",
+    "forcibly closed",
+    "connection reset",
 ]
 UNKNOWN_PATTERNS = [
-    "401", "403", "429", "RESOURCE_EXHAUSTED", "quota", "rate limit", "permission denied",
-    "invalid_grant", "invalid_token", "unauthorized", "consent", "INVALID_ARGUMENT",
-    "FAILED_PRECONDITION", "UNAUTHENTICATED", "token expired",
+    "401",
+    "403",
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "quota",
+    "rate limit",
+    "permission denied",
+    "invalid_grant",
+    "invalid_token",
+    "unauthorized",
+    "consent",
+    "INVALID_ARGUMENT",
+    "FAILED_PRECONDITION",
+    "UNAUTHENTICATED",
+    "token expired",
 ]
 
 

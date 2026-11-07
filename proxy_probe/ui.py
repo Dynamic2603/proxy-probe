@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,24 @@ def format_latency(ms: int) -> str:
     return f"[red]{ms} мс[/red]"
 
 
+def format_cached_counters(cached_counts: dict[str, int]) -> str:
+    order = [RESULT_OK, RESULT_BLOCK, RESULT_DEAD, RESULT_UNKNOWN]
+    parts: list[str] = []
+    for k in order:
+        v = cached_counts.get(k, 0)
+        if v > 0:
+            parts.append(f"{k}: {v}")
+    for k, v in cached_counts.items():
+        if k not in order and v > 0:
+            parts.append(f"{k}: {v}")
+    return f"Из кэша: {', '.join(parts)}" if parts else ""
+
+
+def format_live_counters(counts: dict[str, int]) -> str:
+    order = [RESULT_OK, RESULT_BLOCK, RESULT_DEAD, RESULT_UNKNOWN]
+    return " | ".join(f"{k}: {counts.get(k, 0)}" for k in order)
+
+
 def select_groups_interactive(groups: list[dict[str, Any]], counts: dict[int, int]) -> set[int]:
     if not sys.stdin or not sys.stdin.isatty():
         return {g["id"] for g in groups}
@@ -64,16 +83,22 @@ def select_groups_interactive(groups: list[dict[str, Any]], counts: dict[int, in
         return set()
 
 
-def print_progress_row(server: Server, idx: int, total: int) -> None:
+def print_progress_row(server: Server, idx: int, total: int, write_fn: Callable[[str], None] | None = None) -> None:
     res_badge = format_result(server.result)
     ms_txt = format_latency(server.latency_ms)
     country = server.country or "-"
     note_hint = f" ({server.note[:35]})" if server.note and server.result != RESULT_OK else ""
-    console.print(
+    line = (
         f"  [cyan][{idx:>2}/{total}][/cyan] {res_badge:20s} "
         f"[bold white]{server.host_port:<24}[/bold white] "
         f"{country:<16} {ms_txt:<12} [dim]{server.name[:30]}{note_hint}[/dim]"
     )
+    if write_fn is not None:
+        with console.capture() as cap:
+            console.print(line)
+        write_fn(cap.get().rstrip("\r\n"))
+    else:
+        console.print(line)
 
 
 def print_results_table(servers: list[Server]) -> None:
@@ -118,9 +143,10 @@ def print_summary_panel(
     tested_count = sum(1 for s in servers if s.result)
     if tested_count < len(servers):
         stat = f"{tested_count} из {len(servers)} (прервано)"
-        lines: list[str] = [f"[bold]Проверено серверов:[/] {stat} за [cyan]{elapsed_s:.1f} с[/cyan]"]
+        header = f"[bold]Проверено серверов:[/] {stat} за [cyan]{elapsed_s:.1f} с[/cyan]"
     else:
-        lines: list[str] = [f"[bold]Всего проверено:[/] {len(servers)} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"]
+        header = f"[bold]Всего проверено:[/] {len(servers)} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"
+    lines: list[str] = [header]
 
     breakdown = []
     if counts.get(RESULT_OK):

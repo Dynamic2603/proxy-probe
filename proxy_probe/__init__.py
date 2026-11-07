@@ -52,6 +52,8 @@ from .throne import (
 )
 from .ui import (
     console,
+    format_cached_counters,
+    format_live_counters,
     print_progress_row,
     print_results_table,
     print_summary_panel,
@@ -83,6 +85,8 @@ __all__ = [
     "fetch_geo",
     "fetch_subscription",
     "find_throne_dir",
+    "format_cached_counters",
+    "format_live_counters",
     "gather_sources",
     "get_db_snapshot",
     "get_default_agy_bin",

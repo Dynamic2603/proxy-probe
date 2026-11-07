@@ -35,9 +35,7 @@ class ResultCache:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             servers = data.get("servers") if isinstance(data, dict) else None
             if isinstance(servers, dict):
-                self.entries = {
-                    k: v for k, v in servers.items() if isinstance(k, str) and isinstance(v, dict)
-                }
+                self.entries = {k: v for k, v in servers.items() if isinstance(k, str) and isinstance(v, dict)}
             else:
                 self.entries = {}
         except Exception:
@@ -72,9 +70,7 @@ class ResultCache:
             return rec
         return self.get_valid(server.host_port, now=now)
 
-    def put(
-        self, server_key: str, record: dict, force: bool = False, now: _dt.datetime | None = None
-    ) -> None:
+    def put(self, server_key: str, record: dict, force: bool = False, now: _dt.datetime | None = None) -> None:
         if not force:
             cur = self.get_valid(server_key, now=now)
             if cur:

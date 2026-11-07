@@ -170,8 +170,3 @@ def test_wait_port_with_stop_event() -> None:
     stop_event = threading.Event()
     stop_event.set()
     assert wait_port(21001, None, timeout=10.0, stop_event=stop_event) is False
-
-
-
-
-

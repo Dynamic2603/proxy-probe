@@ -33,6 +33,16 @@ def resolve_gist_id(cli_arg: str | None = None) -> str | None:
     return None
 
 
+def mask_gist_id(gist_id: str | None) -> str:
+    """Маскирует ID гиста для безопасного вывода в логах и консоли (SSOT)."""
+    if not gist_id:
+        return ""
+    clean = gist_id.strip()
+    if len(clean) <= 8:
+        return "***"
+    return f"{clean[:4]}...{clean[-4:]}"
+
+
 def get_github_token() -> str | None:
     """Извлекает GitHub токен из ENV или через утилиту gh (gh auth token)."""
     for var in ("GITHUB_TOKEN", "GH_TOKEN"):

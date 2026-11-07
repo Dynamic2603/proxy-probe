@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from proxy_probe.gist import (
     GistSyncResult,
     get_github_token,
+    mask_gist_id,
     resolve_gist_id,
     sync_file_to_gist,
 )
@@ -36,6 +37,16 @@ def test_resolve_gist_id(monkeypatch) -> None:
     monkeypatch.delenv("GIST_ID")
     assert resolve_gist_id(None) is None
     assert resolve_gist_id("   ") is None
+
+
+def test_mask_gist_id() -> None:
+    assert mask_gist_id("ae7c898aae560906ba5ec3a0357fe53f") == "ae7c...e53f"
+    assert mask_gist_id("  ae7c898aae560906ba5ec3a0357fe53f  ") == "ae7c...e53f"
+    assert mask_gist_id("123456789") == "1234...6789"
+    assert mask_gist_id("12345678") == "***"
+    assert mask_gist_id("12345") == "***"
+    assert mask_gist_id("") == ""
+    assert mask_gist_id(None) == ""
 
 
 def test_get_github_token_from_env(monkeypatch) -> None:

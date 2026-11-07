@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from .cache import ResultCache, default_cache_path
 from .engines import alloc_port, ensure_binaries, project_root
-from .gist import resolve_gist_id, sync_file_to_gist
+from .gist import mask_gist_id, resolve_gist_id, sync_file_to_gist
 from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
 from .orchestrator import (
     dedupe_servers,
@@ -347,7 +347,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
 
     gist_id = resolve_gist_id(getattr(args, "gist_id", None))
     if gist_id:
-        print(f"Синхронизация Gist: включена (ID: {gist_id})")
+        print(f"Синхронизация Gist: включена (ID: {mask_gist_id(gist_id)})")
 
     return RuntimeContext(
         agy_bin=agy_bin,
@@ -986,9 +986,7 @@ def main() -> None:
             with contextlib.suppress(ValueError):
                 recfg(encoding="utf-8", errors="replace")
 
-    ctx = _setup_environment(args)
-
-    if ctx.antidpi and not getattr(args, "no_elevate", False):
+    if args.antidpi and not getattr(args, "no_elevate", False):
         from .antidpi.elevation import is_admin, run_elevated_and_wait
 
         if not is_admin():
@@ -998,16 +996,18 @@ def main() -> None:
             print("=" * 70)
             raw_argv = sys.argv[1:]
             extra_args = [a for a in raw_argv if a != "--no-elevate"]
-            elev_params = subprocess.list2cmdline(["-m", "proxy_probe.cli", *extra_args])
+            elev_params = subprocess.list2cmdline(["-m", "proxy_probe", *extra_args])
             try:
-                run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
-                return
+                rc = run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
+                sys.exit(rc)
             except PermissionError as exc:
                 print(f"\n[!] {exc}", file=sys.stderr)
-                return
+                sys.exit(1223)
             except Exception as exc:
                 print(f"\n[!] Ошибка вызова UAC: {exc}", file=sys.stderr)
-                return
+                sys.exit(1)
+
+    ctx = _setup_environment(args)
 
     groups = read_groups()
     if not groups:

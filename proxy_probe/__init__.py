@@ -10,6 +10,7 @@ from .engines import (
 )
 from .gist import (
     GistSyncResult,
+    mask_gist_id,
     resolve_gist_id,
     sync_file_to_gist,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "is_private_host",
     "link_to_outbound",
     "main",
+    "mask_gist_id",
     "parse_outbound_doc",
     "parse_subscription",
     "pause_on_exit",

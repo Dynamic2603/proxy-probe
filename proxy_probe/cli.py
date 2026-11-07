@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -23,7 +24,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from .cache import ResultCache, default_cache_path
-from .engines import alloc_port, ensure_binaries
+from .engines import alloc_port, ensure_binaries, project_root
 from .gist import resolve_gist_id, sync_file_to_gist
 from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
 from .orchestrator import (
@@ -229,6 +230,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=10850,
         help="порт локального изолированного SOCKS5-релея (по умолчанию 10850)",
+    )
+    ap.add_argument(
+        "--no-elevate",
+        action="store_true",
+        help="не запрашивать повышение прав через UAC автоматически",
     )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
@@ -924,6 +930,27 @@ def main() -> None:
                 recfg(encoding="utf-8", errors="replace")
 
     ctx = _setup_environment(args)
+
+    if ctx.antidpi and not getattr(args, "no_elevate", False):
+        from .antidpi.elevation import is_admin, run_elevated_and_wait
+
+        if not is_admin():
+            print("=" * 70)
+            print("  proxy-probe: Запрос прав Администратора для WinDivert (Zapret2)")
+            print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
+            print("=" * 70)
+            raw_argv = sys.argv[1:]
+            extra_args = [a for a in raw_argv if a != "--no-elevate"]
+            elev_params = subprocess.list2cmdline(["-m", "proxy_probe.cli", *extra_args])
+            try:
+                run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
+                return
+            except PermissionError as exc:
+                print(f"\n[!] {exc}", file=sys.stderr)
+                return
+            except Exception as exc:
+                print(f"\n[!] Ошибка вызова UAC: {exc}", file=sys.stderr)
+                return
 
     groups = read_groups()
     if not groups:

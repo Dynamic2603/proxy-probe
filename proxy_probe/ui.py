@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,7 +9,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, RESULT_UNKNOWN, Server
+from .models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, RESULT_UNKNOWN, STATE_DEGRADED, Server
+from .stats import SummaryStats, compute_summary_stats
 
 console = Console()
 
@@ -112,8 +112,51 @@ def print_progress_row(server: Server, idx: int, total: int, write_fn: Callable[
         console.print(line)
 
 
-def print_results_table(servers: list[Server]) -> None:
-    table = Table(title="Результаты проверки серверов", header_style="bold magenta", expand=True)
+def print_results_table(
+    servers: list[Server],
+    mode: str = "ok",
+    limit: int = 20,
+) -> None:
+    """Выводит итоговую таблицу результатов в консоль.
+
+    Параметры:
+        mode: "ok" (только рабочие узлы AGY-OK и DEGRADED),
+              "all" (все проверенные узлы),
+              "none" (не выводить таблицу).
+        limit: максимальное количество строк (0 - без лимита).
+    """
+    if mode == "none":
+        return
+
+    if mode == "ok":
+        candidates = [s for s in servers if s.result == RESULT_OK or s.state == STATE_DEGRADED]
+        title = "Рабочие серверы (AGY-OK)"
+    else:
+        candidates = [s for s in servers if s.result]
+        title = "Результаты проверки серверов"
+
+    if not candidates:
+        if mode == "ok":
+            console.print("\n[dim]Рабочих серверов (AGY-OK) не найдено (см. полный отчёт в report.md)[/dim]")
+        return
+
+    total_candidates = len(candidates)
+    if limit > 0 and total_candidates > limit:
+        displayed = candidates[:limit]
+        caption = (
+            f"[dim]Показано первых {limit} из {total_candidates} серверов "
+            f"(полный список — в report.md и proxy-ok.txt)[/dim]"
+        )
+    else:
+        displayed = candidates
+        caption = None
+
+    table = Table(
+        title=title,
+        header_style="bold magenta",
+        expand=True,
+        caption=caption,
+    )
     table.add_column("№", style="dim", width=4, justify="right")
     table.add_column("Статус", justify="center", width=12)
     table.add_column("Группа", style="cyan", width=14)
@@ -125,7 +168,7 @@ def print_results_table(servers: list[Server]) -> None:
     table.add_column("Имя", style="dim", max_width=30, overflow="ellipsis", no_wrap=True)
     table.add_column("Ответ / Примечание", style="dim", ratio=1, overflow="ellipsis", no_wrap=True)
 
-    for s in servers:
+    for s in displayed:
         table.add_row(
             str(s.index),
             format_result(s.result),
@@ -150,27 +193,71 @@ def print_summary_panel(
     nx: int,
     elapsed_s: float,
     cached_unique_hosts: dict[str, set[str]] | None = None,
+    stats: SummaryStats | None = None,
 ) -> None:
-    counts = Counter(s.result for s in servers if s.result)
-    tested_count = sum(1 for s in servers if s.result)
-    if tested_count < len(servers):
-        stat = f"{tested_count} из {len(servers)} (прервано)"
+    if stats is None:
+        stats = compute_summary_stats(servers)
+
+    tested_count = stats.tested
+    total_count = stats.total
+    if tested_count < total_count:
+        stat = f"{tested_count} из {total_count} (прервано)"
         header = f"[bold]Проверено серверов:[/] {stat} за [cyan]{elapsed_s:.1f} с[/cyan]"
     else:
-        header = f"[bold]Всего проверено:[/] {len(servers)} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"
+        header = f"[bold]Всего проверено:[/] {total_count} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"
     lines: list[str] = [header]
 
     breakdown = []
-    if counts.get(RESULT_OK):
-        breakdown.append(f"[bold green]AGY-OK:[/] {counts[RESULT_OK]}")
-    if counts.get(RESULT_BLOCK):
-        breakdown.append(f"[bold red]AGY-BLOCK:[/] {counts[RESULT_BLOCK]}")
-    if counts.get(RESULT_DEAD):
-        breakdown.append(f"[dim red]DEAD:[/] {counts[RESULT_DEAD]}")
-    if counts.get(RESULT_UNKNOWN):
-        breakdown.append(f"[bold yellow]UNKNOWN:[/] {counts[RESULT_UNKNOWN]}")
+    if stats.counts.get(RESULT_OK):
+        breakdown.append(f"[bold green]AGY-OK:[/] {stats.counts[RESULT_OK]}")
+    if stats.counts.get(RESULT_BLOCK):
+        breakdown.append(f"[bold red]AGY-BLOCK:[/] {stats.counts[RESULT_BLOCK]}")
+    if stats.counts.get(RESULT_DEAD):
+        breakdown.append(f"[dim red]DEAD:[/] {stats.counts[RESULT_DEAD]}")
+    if stats.counts.get(RESULT_UNKNOWN):
+        breakdown.append(f"[bold yellow]UNKNOWN:[/] {stats.counts[RESULT_UNKNOWN]}")
 
-    lines.append(" | ".join(breakdown))
+    if breakdown:
+        lines.append(" | ".join(breakdown))
+
+    # 1. География рабочих узлов (текстовый формат без emoji-флагов: DE (Германия): N)
+    if stats.geo_stats:
+        lines.append("")
+        lines.append("[bold cyan]География (AGY-OK):[/]")
+        geo_parts = []
+        for g in stats.geo_stats[:6]:
+            label = f"{g.code} ({g.name})" if g.name and g.name != g.code else g.code
+            ms_txt = f" (ср. {g.avg_latency_ms} мс)" if g.avg_latency_ms > 0 else ""
+            geo_parts.append(f"{label}: [bold]{g.count}[/]{ms_txt}")
+        lines.append("  " + " | ".join(geo_parts))
+
+    # 2. Задержка рабочих серверов
+    if stats.latency_avg > 0:
+        lines.append("")
+        lines.append(
+            f"[bold cyan]Задержка (AGY-OK):[/] "
+            f"мин [green]{stats.latency_min}[/] мс | "
+            f"медиана [yellow]{stats.latency_median}[/] мс | "
+            f"средняя [yellow]{stats.latency_avg}[/] мс"
+        )
+
+    # 3. Эффективность подписок
+    if stats.group_stats:
+        lines.append("")
+        lines.append("[bold cyan]Подписки (эффективность):[/]")
+        for grp in stats.group_stats[:6]:
+            rate_color = "green" if grp.success_rate >= 30 else ("yellow" if grp.success_rate > 0 else "dim red")
+            lines.append(
+                f"  • [{grp.group_id}] {grp.group_name[:25]}: "
+                f"[{rate_color}]{grp.ok_count}/{grp.total_count} OK ({grp.success_rate:.1f}%)[/{rate_color}]"
+            )
+
+    # 4. Причины сбоев
+    if stats.failure_reasons:
+        lines.append("")
+        lines.append("[bold cyan]Причины сбоев (DEAD / BLOCK):[/]")
+        for reason, count in stats.failure_reasons:
+            lines.append(f"  • {reason}: [red]{count}[/]")
 
     cached_total = sum(cached_counts.values())
     if cached_total > 0:
@@ -183,6 +270,7 @@ def print_summary_panel(
                 c_parts.append(f"{k}: {v} ({u_cnt} уникальных)")
             else:
                 c_parts.append(f"{k}: {v}")
+        lines.append("")
         lines.append(f"[dim]Из кэша (без повторной проверки): {', '.join(c_parts)}[/dim]")
 
     lines.append("")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -257,7 +258,12 @@ def build_xray_config(outbound: dict[str, Any], port: int, log_path: str = "") -
 
 
 def xray_shorthand_to_v2ray(o: dict[str, Any]) -> dict[str, Any]:
-    s = o.get("settings", {})
+    s = o.get("settings")
+    if isinstance(s, dict) and ("vnext" in s or "servers" in s):
+        out = copy.deepcopy(o)
+        out["tag"] = "probe"
+        return out
+    s = s or {}
     ss = dict(o.get("streamSettings", {}))
     net = ss.get("network", "tcp")
     sec = ss.get("security") or "none"

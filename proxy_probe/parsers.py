@@ -363,6 +363,27 @@ def decode_body(data: bytes) -> str:
     return txt
 
 
+NON_PROXY_PROTOCOLS: frozenset[str] = frozenset({"freedom", "blackhole", "dns", "direct", "block"})
+
+
+def extract_proxy_outbounds_from_config(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Извлекает список прокси-аутбаундов из комплексной конфигурации Xray/sing-box (SSOT).
+
+    Исключает служебные протоколы (freedom, blackhole, direct, dns, block).
+    """
+    raw_obs = cfg.get("outbounds")
+    if not isinstance(raw_obs, list):
+        return []
+    res: list[dict[str, Any]] = []
+    for o in raw_obs:
+        if not isinstance(o, dict):
+            continue
+        proto = str(o.get("protocol") or o.get("type") or "").strip().lower()
+        if proto and proto not in NON_PROXY_PROTOCOLS:
+            res.append(o)
+    return res
+
+
 def parse_outbound_doc(doc: str) -> list[tuple[str, dict]]:
     doc = doc.strip()
     if not doc:
@@ -372,14 +393,42 @@ def parse_outbound_doc(doc: str) -> list[tuple[str, dict]]:
             j = json.loads(doc)
         except Exception:
             return []
-        objs = j.get("outbounds", [j]) if isinstance(j, dict) else j
+        items = j if isinstance(j, list) else [j]
+        # Если в списке есть как одиночные профили, так и балансировщики,
+        # отфильтруем балансировщики, чтобы не затирать канонические имена узлов
+        has_standalone = any(
+            isinstance(it, dict)
+            and (
+                len(extract_proxy_outbounds_from_config(it)) == 1
+                or "protocol" in it
+                or "type" in it
+            )
+            for it in items
+        )
         res: list[tuple[str, dict]] = []
-        for o in objs if isinstance(objs, list) else [objs]:
-            if isinstance(o, dict):
-                if "protocol" in o:
-                    res.append(("xray", o))
-                elif "type" in o:
-                    res.append(("sing-box", o))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("outbounds"), list):
+                if has_standalone and (
+                    bool(item.get("routing", {}).get("balancers"))
+                    or bool(item.get("burstObservatory"))
+                ):
+                    continue
+                proxy_obs = extract_proxy_outbounds_from_config(item)
+                remarks = str(item.get("remarks") or item.get("tag") or "").strip()
+                for po in proxy_obs:
+                    engine = "xray" if "protocol" in po else ("sing-box" if "type" in po else "xray")
+                    po_dict = dict(po)
+                    if remarks and (not po_dict.get("tag") or po_dict.get("tag") in ("proxy", "outbound")):
+                        po_dict["tag"] = remarks
+                    res.append((engine, po_dict))
+            elif "protocol" in item:
+                if str(item.get("protocol")).lower() not in NON_PROXY_PROTOCOLS:
+                    res.append(("xray", item))
+            elif "type" in item:
+                if str(item.get("type")).lower() not in NON_PROXY_PROTOCOLS:
+                    res.append(("sing-box", item))
         return res
     if "://" in doc:
         try:
@@ -400,12 +449,32 @@ def parse_subscription(data: bytes) -> list[tuple[str, dict]]:
 
 
 def extract_host_port(obj: dict) -> tuple[str, int]:
-    srv = obj.get("server") or (obj.get("settings") or {}).get("address")
-    prt = obj.get("server_port") or (obj.get("settings") or {}).get("port")
+    sett = obj.get("settings")
+    sett_dict: dict[str, Any] = sett if isinstance(sett, dict) else {}
+    srv = obj.get("server") or sett_dict.get("address")
+    prt = obj.get("server_port") or sett_dict.get("port")
+    if (
+        (not srv or not prt)
+        and (vnext := sett_dict.get("vnext"))
+        and isinstance(vnext, list)
+        and vnext
+        and isinstance(vnext[0], dict)
+    ):
+        srv = srv or vnext[0].get("address")
+        prt = prt or vnext[0].get("port")
+    if (
+        (not srv or not prt)
+        and (servers := sett_dict.get("servers"))
+        and isinstance(servers, list)
+        and servers
+        and isinstance(servers[0], dict)
+    ):
+        srv = srv or servers[0].get("address")
+        prt = prt or servers[0].get("port")
     peers = obj.get("peers")
     if not srv and isinstance(peers, list) and peers and isinstance(peers[0], dict):
         srv = peers[0].get("address") or peers[0].get("server")
-        prt = peers[0].get("port")
+        prt = prt or peers[0].get("port")
     return str(srv or ""), int(prt or 0)
 
 

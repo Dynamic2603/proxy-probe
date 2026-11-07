@@ -385,7 +385,8 @@ def _execute_probe_pool(
     if cache_line:
         console.print(f"[dim]{cache_line}[/dim]")
 
-    live_counts = Counter(cached_counts or {})
+    # Счётчик результатов проверки движками (изолирован от кэша и Stage 0)
+    engine_counts: Counter[str] = Counter()
     run_root = run_dir()
     registry = ProcessRegistry()
     stop_event = threading.Event()
@@ -433,16 +434,16 @@ def _execute_probe_pool(
                         s.result = RESULT_DEAD
                         s.latency_ms = res[1]
                         s.note = res[2]
-                        live_counts[RESULT_DEAD] += 1
                         completed_count += 1
                         stage0_dead_cnt += 1
                         continue
                 survivors.append(s)
 
             if stage0_dead_cnt:
+                dead_endpoints_cnt = sum(1 for is_alive, _, _ in tcp_results.values() if not is_alive)
                 console.print(
                     f"[dim]L4 TCP-предфильтр: проверено {len(tcp_endpoints)} эндпоинтов, "
-                    f"отсеяно {stage0_dead_cnt} мёртвых узлов за {dt_tcp:.1f} с[/dim]"
+                    f"отсеяно {stage0_dead_cnt} серверов ({dead_endpoints_cnt} узлов) за {dt_tcp:.1f} с[/dim]"
                 )
             to_probe_engine = survivors
 
@@ -478,7 +479,7 @@ def _execute_probe_pool(
         unit="srv",
         dynamic_ncols=True,
     )
-    pbar.set_postfix_str(format_live_counters(live_counts), refresh=True)
+    pbar.set_postfix_str(format_live_counters(engine_counts), refresh=True)
 
     try:
         for _i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -491,8 +492,8 @@ def _execute_probe_pool(
                 s.result = RESULT_UNKNOWN
                 s.note = f"ошибка: {e}"
                 completed_count += 1
-                live_counts[s.result] += 1
-                pbar.set_postfix_str(format_live_counters(live_counts), refresh=False)
+                engine_counts[s.result] += 1
+                pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
                 pbar.update(1)
                 continue
 
@@ -505,8 +506,8 @@ def _execute_probe_pool(
             s.latency_ms = probe_res.get("latency_ms", 0)
             s.note = probe_res.get("note", "")
             completed_count += 1
-            live_counts[s.result] += 1
-            pbar.set_postfix_str(format_live_counters(live_counts), refresh=False)
+            engine_counts[s.result] += 1
+            pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
             pbar.update(1)
     except KeyboardInterrupt:
         interrupted = True

@@ -414,4 +414,37 @@ def test_main_calls_load_dotenv() -> None:
         mock_load_dotenv.assert_called_once()
 
 
+def test_cli_geo_precheck_and_web_flags() -> None:
+    parser = build_arg_parser()
+    # По умолчанию: precheck включен, timeout 2.5, web отключен
+    args = parser.parse_args([])
+    assert args.no_geo_precheck is False
+    assert args.geo_precheck_timeout == 2.5
+    assert args.check_web is False
+
+    # С пользовательскими флагами
+    custom_args = parser.parse_args(["--no-geo-precheck", "--geo-precheck-timeout", "4.0", "--check-web"])
+    assert custom_args.no_geo_precheck is True
+    assert custom_args.geo_precheck_timeout == 4.0
+    assert custom_args.check_web is True
+
+
+def test_setup_environment_geo_precheck_flags() -> None:
+    from pathlib import Path
+
+    from proxy_probe.cli import _setup_environment
+
+    parser = build_arg_parser()
+    args = parser.parse_args(["--geo-precheck-timeout", "3.0", "--check-web", "--skip-precheck", "--no-cache"])
+
+    with patch("proxy_probe.cli._resolve_agy_bin", return_value="agy"), \
+         patch("proxy_probe.cli.detect_throne_versions", return_value=("1.0", "1.0")), \
+         patch("proxy_probe.cli.ensure_binaries", return_value=(Path("sb"), Path("xr"))):
+        ctx = _setup_environment(args)
+
+    assert ctx.use_geo_precheck is True
+    assert ctx.geo_precheck_timeout == 3.0
+    assert ctx.check_web is True
+
+
 

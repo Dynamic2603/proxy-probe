@@ -22,11 +22,16 @@ from .engines import build_singbox_config, build_xray_config, wait_port, xray_sh
 from .models import (
     BLOCK_MARKERS,
     DEAD_PATTERNS,
+    GEO_PRECHECK_URL,
     RESULT_BLOCK,
     RESULT_DEAD,
     RESULT_OK,
     RESULT_UNKNOWN,
     UNKNOWN_PATTERNS,
+    WEB_CHECK_URL,
+    WEB_STATUS_BLOCKED,
+    WEB_STATUS_CAPTCHA,
+    WEB_STATUS_OK,
     QuotaInfo,
     country_code_to_emoji,
     parse_quota_info,
@@ -455,20 +460,120 @@ def enrich_cached_ok_geo(cache: Any, max_workers: int = 10) -> int:
     return 0
 
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Предотвращает автоматический переход по редиректам для инспекции заголовков."""
+
+    def redirect_request(self, *args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def tunnel_http_request(
+    port: int,
+    url: str,
+    timeout: float = 4.0,
+    headers: dict[str, str] | None = None,
+    follow_redirects: bool = True,
+) -> tuple[int, str, dict[str, str]]:
+    """Выполняет HTTP(S) запрос через локальный прокси-порт туннеля (SSOT/DRY).
+
+    Возвращает (status_code, body_snippet, response_headers).
+    При сбое сети или таймауте возвращает (0, "", {}).
+    """
+    proxy_url = f"http://127.0.0.1:{port}"
+    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    handlers: list[Any] = [proxy_handler]
+    if not follow_redirects:
+        handlers.append(NoRedirectHandler())
+    opener = urllib.request.build_opener(*handlers)
+
+    req_headers = {"User-Agent": USER_AGENT}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers)
+
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            code = getattr(resp, "status", getattr(resp, "code", 200))
+            raw = resp.read(65536)
+            body = raw.decode("utf-8", errors="replace")
+            resp_headers = {k.lower(): str(v) for k, v in resp.headers.items()}
+            return code, body, resp_headers
+    except urllib.error.HTTPError as e:
+        code = e.code
+        try:
+            raw = e.read(65536)
+            body = raw.decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        resp_headers = {k.lower(): str(v) for k, v in e.headers.items()} if hasattr(e, "headers") and e.headers else {}
+        return code, body, resp_headers
+    except Exception:
+        return 0, "", {}
+
+
 def preflight_check(port: int, timeout: float = 4.0) -> bool:
     """Fast connectivity test through proxy before launching heavy agy binary.
 
     Returns True if the proxy tunnel is alive (can reach external hosts).
     """
-    proxy_url = f"http://127.0.0.1:{port}"
-    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    opener = urllib.request.build_opener(handler)
-    req = urllib.request.Request(PREFLIGHT_URL, headers={"User-Agent": USER_AGENT})
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.status in (200, 204)
-    except Exception:
-        return False
+    code, _, _ = tunnel_http_request(port, PREFLIGHT_URL, timeout=timeout)
+    return code in (200, 204)
+
+
+def geo_precheck(port: int, timeout: float = 2.5) -> tuple[bool, str]:
+    """Быстрая проверка геоблока Google через легковесный запрос к aistudio.google.com.
+
+    Возвращает (is_blocked, reason):
+      (True, reason) -> подтверждённый геоблок (403 Forbidden / явный маркер в ответе).
+      (False, "")    -> доступ к Google Edge открыт (200 OK / 302).
+    """
+    code, body, _headers = tunnel_http_request(
+        port,
+        GEO_PRECHECK_URL,
+        timeout=timeout,
+        headers={"Accept-Language": "en-US,en;q=0.9"},
+        follow_redirects=True,
+    )
+    if code == 403:
+        return True, "403 Forbidden"
+    if code == 0:
+        return False, ""
+    body_lower = body.lower()
+    if "user location is not supported" in body_lower or "unsupported location" in body_lower:
+        return True, "unsupported location"
+    return False, ""
+
+
+def web_probe(port: int, timeout: float = 3.5) -> tuple[str, str]:
+    """Проверяет веб-доступность gemini.google.com и выявляет капчу Google.
+
+    Возвращает (web_status, detail):
+      (WEB_STATUS_OK, "200 OK")
+      (WEB_STATUS_CAPTCHA, "google.com/sorry")
+      (WEB_STATUS_BLOCKED, "403 Forbidden")
+      ("", "failed/timeout")
+    """
+    code, body, headers = tunnel_http_request(
+        port,
+        WEB_CHECK_URL,
+        timeout=timeout,
+        headers={"Accept-Language": "en-US,en;q=0.9"},
+        follow_redirects=True,
+    )
+    if code == 0:
+        return "", "connection failed"
+    if code == 403:
+        return WEB_STATUS_BLOCKED, "403 Forbidden"
+
+    location = headers.get("location", "").lower()
+    body_lower = body.lower()
+    if "sorry/index" in location or "unusual traffic from your computer network" in body_lower:
+        return WEB_STATUS_CAPTCHA, "google.com/sorry"
+
+    if code in (200, 302, 303):
+        return WEB_STATUS_OK, f"{code} OK"
+
+    return "", f"http {code}"
 
 
 def _drain_output(pipe: Any, buf: deque[str]) -> None:
@@ -495,6 +600,8 @@ def run_probe(
     circuit_breaker: QuotaCircuitBreaker | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
+    use_geo_precheck: bool = True,
+    check_web: bool = False,
 ) -> dict[str, Any]:
     if stop_event is not None and stop_event.is_set():
         return {
@@ -641,6 +748,22 @@ def run_probe(
         else:
             country, ip_out, country_code, city, org = "", "", "", "", ""
 
+        # Zero-Quota Geo Precheck (быстрый отсев геоблока до запуска agy)
+        if use_geo_precheck:
+            is_blocked, block_reason = geo_precheck(port, timeouts.get("geo_precheck", 2.5))
+            if is_blocked:
+                return {
+                    "result": RESULT_BLOCK,
+                    "country": country,
+                    "ip_out": ip_out,
+                    "country_code": country_code,
+                    "city": city,
+                    "org": org,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "note": f"геоблок (быстрый precheck: {block_reason})",
+                    "web_status": WEB_STATUS_BLOCKED,
+                }
+
         if circuit_breaker is not None and circuit_breaker.is_tripped:
             return {
                 "result": RESULT_UNKNOWN,
@@ -727,6 +850,13 @@ def run_probe(
             else:
                 note = ""
 
+        web_status = ""
+        if check_web and result == RESULT_OK:
+            w_status, _ = web_probe(port, timeouts.get("web_check", 3.5))
+            web_status = w_status
+            if w_status == WEB_STATUS_CAPTCHA:
+                note = f"{note} [captcha]".strip() if note else "captcha (google.com/sorry)"
+
         return {
             "result": result,
             "country": country,
@@ -736,6 +866,7 @@ def run_probe(
             "org": org,
             "latency_ms": latency,
             "note": note,
+            "web_status": web_status,
         }
     finally:
         if proc is not None:

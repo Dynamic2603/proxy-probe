@@ -64,6 +64,7 @@ def _normalize_entry(rec: dict) -> dict:
     rec.setdefault("check_count", 1)
     rec.setdefault("first_seen", rec.get("checked", ""))
     rec.setdefault("last_ok", rec.get("checked", "") if is_ok else "")
+    rec.setdefault("web_status", "")
     return rec
 
 
@@ -196,6 +197,7 @@ class ResultCache:
             "org": server.org or cur.get("org", ""),
             "latency_ms": server.latency_ms,
             "note": server.note,
+            "web_status": server.web_status or cur.get("web_status", ""),
             "state": new_state,
             "score": new_score,
             "consecutive_fails": new_fails,

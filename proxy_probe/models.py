@@ -10,6 +10,12 @@ RESULT_BLOCK = "AGY-BLOCK"
 RESULT_DEAD = "DEAD"
 RESULT_UNKNOWN = "UNKNOWN"
 
+GEO_PRECHECK_URL = "https://aistudio.google.com"
+WEB_CHECK_URL = "https://gemini.google.com"
+WEB_STATUS_OK = "ok"
+WEB_STATUS_CAPTCHA = "captcha"
+WEB_STATUS_BLOCKED = "blocked"
+
 STATE_ACTIVE = "ACTIVE"
 STATE_DEGRADED = "DEGRADED"
 STATE_DEAD = "DEAD"
@@ -122,6 +128,7 @@ class Server:
     score: int = 0
     state: str = STATE_ACTIVE
     consecutive_fails: int = 0
+    web_status: str = ""
     _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _sni: str | None = dataclasses.field(default=None, repr=False, compare=False)
@@ -233,6 +240,9 @@ class Server:
             badge = f"[⭐{self.score}]" if self.score >= 90 else (f"[{self.score}]" if self.score > 0 else "")
         elif self.state == STATE_DEGRADED:
             badge = f"[⚠️{self.score}]"
+
+        if self.web_status == WEB_STATUS_CAPTCHA:
+            badge = f"{badge}[captcha]" if badge else "[captcha]"
 
         if badge:
             head = f"{badge} {head}"

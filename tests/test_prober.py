@@ -227,3 +227,169 @@ def test_server_is_tcp_protocol() -> None:
     assert s_hy2.is_tcp_protocol is False
     assert s_wg.is_tcp_protocol is False
     assert s_none.is_tcp_protocol is True
+
+
+def test_tunnel_http_request_success() -> None:
+    from unittest.mock import MagicMock, patch
+
+    mock_resp = MagicMock()
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.status = 200
+    mock_resp.getcode.return_value = 200
+    mock_resp.read.return_value = b"OK content"
+    mock_resp.headers = {"Content-Type": "text/html"}
+
+    with patch("urllib.request.build_opener") as mock_opener:
+        mock_opener.return_value.open.return_value = mock_resp
+        code, body, headers = prober.tunnel_http_request(1234, "https://example.com")
+        assert code == 200
+        assert body == "OK content"
+        assert headers.get("content-type") == "text/html"
+
+
+def test_tunnel_http_request_http_error() -> None:
+    import urllib.error
+    from unittest.mock import MagicMock, patch
+
+    err = urllib.error.HTTPError(
+        url="https://example.com",
+        code=403,
+        msg="Forbidden",
+        hdrs=MagicMock(items=lambda: [("Content-Type", "text/plain")]),
+        fp=MagicMock(read=lambda _=65536: b"User location is not supported"),
+    )
+
+    with patch("urllib.request.build_opener") as mock_opener:
+        mock_opener.return_value.open.side_effect = err
+        code, body, headers = prober.tunnel_http_request(1234, "https://example.com")
+        assert code == 403
+        assert "User location is not supported" in body
+        assert headers.get("content-type") == "text/plain"
+
+
+def test_tunnel_http_request_network_error() -> None:
+    import urllib.error
+    from unittest.mock import patch
+
+    with patch("urllib.request.build_opener") as mock_opener:
+        mock_opener.return_value.open.side_effect = urllib.error.URLError("Connection refused")
+        code, body, headers = prober.tunnel_http_request(1234, "https://example.com")
+        assert code == 0
+        assert body == ""
+        assert headers == {}
+
+
+def test_geo_precheck_blocked_403() -> None:
+    from unittest.mock import patch
+
+    with patch("proxy_probe.prober.tunnel_http_request", return_value=(403, "Forbidden", {})):
+        is_blocked, reason = prober.geo_precheck(1234)
+        assert is_blocked is True
+        assert reason == "403 Forbidden"
+
+
+def test_geo_precheck_blocked_body() -> None:
+    from unittest.mock import patch
+
+    with patch(
+        "proxy_probe.prober.tunnel_http_request",
+        return_value=(200, "Error: User location is not supported", {}),
+    ):
+        is_blocked, reason = prober.geo_precheck(1234)
+        assert is_blocked is True
+        assert reason == "unsupported location"
+
+
+def test_geo_precheck_ok() -> None:
+    from unittest.mock import patch
+
+    with patch("proxy_probe.prober.tunnel_http_request", return_value=(200, "OK", {})):
+        is_blocked, reason = prober.geo_precheck(1234)
+        assert is_blocked is False
+        assert reason == ""
+
+
+def test_web_probe_ok() -> None:
+    from unittest.mock import patch
+
+    from proxy_probe.models import WEB_STATUS_OK
+
+    with patch("proxy_probe.prober.tunnel_http_request", return_value=(200, "<html>Gemini</html>", {})):
+        status, detail = prober.web_probe(1234)
+        assert status == WEB_STATUS_OK
+        assert "200 OK" in detail
+
+
+def test_web_probe_captcha() -> None:
+    from unittest.mock import patch
+
+    from proxy_probe.models import WEB_STATUS_CAPTCHA
+
+    with patch(
+        "proxy_probe.prober.tunnel_http_request",
+        return_value=(302, "", {"location": "https://www.google.com/sorry/index?continue=..."}),
+    ):
+        status, detail = prober.web_probe(1234)
+        assert status == WEB_STATUS_CAPTCHA
+        assert "google.com/sorry" in detail
+
+
+def test_web_probe_blocked() -> None:
+    from unittest.mock import patch
+
+    from proxy_probe.models import WEB_STATUS_BLOCKED
+
+    with patch("proxy_probe.prober.tunnel_http_request", return_value=(403, "Forbidden", {})):
+        status, detail = prober.web_probe(1234)
+        assert status == WEB_STATUS_BLOCKED
+        assert "403 Forbidden" in detail
+
+
+def test_run_probe_geo_precheck_early_block() -> None:
+    import sys
+    from unittest.mock import patch
+
+    with patch("proxy_probe.prober.wait_port", return_value=True), \
+         patch("proxy_probe.prober.preflight_check", return_value=True), \
+         patch("proxy_probe.prober.fetch_geo", return_value=("US", "1.2.3.4", "US", "Ashburn", "ISP")), \
+         patch("proxy_probe.prober.geo_precheck", return_value=(True, "403 Forbidden")), \
+         patch("proxy_probe.prober.agy_probe") as mock_agy:
+
+        res = prober.run_probe(
+            sys.executable,
+            False,
+            {"type": "direct"},
+            21995,
+            use_geo_precheck=True,
+        )
+
+        assert res["result"] == RESULT_BLOCK
+        assert "геоблок (быстрый precheck: 403 Forbidden)" in res["note"]
+        mock_agy.assert_not_called()
+
+
+def test_run_probe_web_probe_integrated() -> None:
+    import sys
+    from unittest.mock import patch
+
+    from proxy_probe.models import WEB_STATUS_CAPTCHA
+
+    with patch("proxy_probe.prober.wait_port", return_value=True), \
+         patch("proxy_probe.prober.preflight_check", return_value=True), \
+         patch("proxy_probe.prober.fetch_geo", return_value=("DE", "1.2.3.4", "DE", "Frankfurt", "Hetzner")), \
+         patch("proxy_probe.prober.geo_precheck", return_value=(False, "")), \
+         patch("proxy_probe.prober.agy_probe", return_value=("OK", 0)), \
+         patch("proxy_probe.prober.web_probe", return_value=(WEB_STATUS_CAPTCHA, "google.com/sorry")):
+
+        res = prober.run_probe(
+            sys.executable,
+            False,
+            {"type": "direct"},
+            21994,
+            use_geo_precheck=True,
+            check_web=True,
+        )
+
+        assert res["result"] == RESULT_OK
+        assert res["web_status"] == WEB_STATUS_CAPTCHA
+        assert "[captcha]" in res["note"]

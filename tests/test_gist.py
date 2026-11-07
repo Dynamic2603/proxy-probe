@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import email.message
 import io
 import json
 import urllib.error
@@ -125,7 +126,7 @@ def test_sync_file_to_gist_http_error(tmp_path: Path) -> None:
         url="https://api.github.com/gists/gist123",
         code=404,
         msg="Not Found",
-        hdrs=None,
+        hdrs=email.message.Message(),
         fp=io.BytesIO(b'{"message": "Not Found"}'),
     )
 

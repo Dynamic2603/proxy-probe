@@ -425,3 +425,9 @@ def test_formatted_tag_with_score_badges() -> None:
     s.score = 40
     s.state = STATE_DEGRADED
     assert s.formatted_tag == "[⚠️40] 🇩🇪 DE, Frankfurt | Hetzner"
+
+    # Узел с веб-капчей -> добавляется бейдж [captcha]
+    s.score = 70
+    s.state = STATE_ACTIVE
+    s.web_status = "captcha"
+    assert s.formatted_tag == "[70][captcha] 🇩🇪 DE, Frankfurt | Hetzner"

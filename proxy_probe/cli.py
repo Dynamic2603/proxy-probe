@@ -175,6 +175,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="отключить предварительную фильтрацию хостов по представителям эндпоинтов",
     )
     ap.add_argument(
+        "--no-geo-precheck",
+        action="store_true",
+        help="отключить быстрый предварительный отсев геоблоков Google до запуска agy (Geo Precheck)",
+    )
+    ap.add_argument(
+        "--geo-precheck-timeout",
+        type=float,
+        default=2.5,
+        help="таймаут быстрого предфильтра геоблока в секундах (по умолчанию 2.5)",
+    )
+    ap.add_argument(
+        "--check-web",
+        action="store_true",
+        help="дополнительно проверять доступность gemini.google.com и выявлять капчу",
+    )
+    ap.add_argument(
         "--table",
         choices=["ok", "all", "none"],
         default="ok",
@@ -228,6 +244,9 @@ class RuntimeContext:
     tcp_concurrency: int = 100
     preflight_timeout: float = 2.5
     use_rep_filter: bool = True
+    use_geo_precheck: bool = True
+    geo_precheck_timeout: float = 2.5
+    check_web: bool = False
     table_mode: str = "ok"
     table_limit: int = 20
     gist_id: str | None = None
@@ -312,6 +331,9 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         tcp_concurrency=int(getattr(args, "tcp_concurrency", 100)),
         preflight_timeout=float(getattr(args, "preflight_timeout", 2.5)),
         use_rep_filter=not getattr(args, "no_rep_filter", False),
+        use_geo_precheck=not getattr(args, "no_geo_precheck", False),
+        geo_precheck_timeout=float(getattr(args, "geo_precheck_timeout", 2.5)),
+        check_web=bool(getattr(args, "check_web", False)),
         table_mode=str(getattr(args, "table", "ok")),
         table_limit=int(getattr(args, "table_limit", 20)),
         gist_id=gist_id,
@@ -372,6 +394,7 @@ def _collect_and_select_servers(
             s.score = int(rec.get("score", 70 if res == "AGY-OK" else 0))
             s.state = str(rec.get("state", "ACTIVE" if res == "AGY-OK" else "DEAD"))
             s.consecutive_fails = int(rec.get("consecutive_fails", 0))
+            s.web_status = str(rec.get("web_status", ""))
             cached_counts[res] = cached_counts.get(res, 0) + 1
             cached_unique_hosts.setdefault(res, set()).add(s.host_port)
         else:
@@ -393,6 +416,8 @@ def _probe_worker(
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
     run_root: Path | None = None,
+    use_geo_precheck: bool = True,
+    check_web: bool = False,
 ) -> dict[str, Any]:
     port = alloc_port()
     return run_probe(
@@ -409,6 +434,8 @@ def _probe_worker(
         circuit_breaker=circuit_breaker,
         stop_event=stop_event,
         registry=registry,
+        use_geo_precheck=use_geo_precheck,
+        check_web=check_web,
     )
 
 
@@ -518,6 +545,7 @@ def _execute_probe_pool(
             server.org = probe_res.get("org", "")
             server.latency_ms = probe_res.get("latency_ms", 0)
             server.note = probe_res.get("note", "")
+            server.web_status = probe_res.get("web_status", "")
         completed_count += 1
         engine_counts[server.result] += 1
         pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
@@ -540,6 +568,8 @@ def _execute_probe_pool(
             circuit_breaker=cb,
             stop_event=stop_event,
             registry=registry,
+            use_geo_precheck=getattr(ctx, "use_geo_precheck", True),
+            check_web=getattr(ctx, "check_web", False),
         )
 
     try:
@@ -713,8 +743,10 @@ def main() -> None:
     timeouts = {
         "start": min(args.timeout, 12.0),
         "preflight": args.preflight_timeout,
+        "geo_precheck": args.geo_precheck_timeout,
         "probe": args.timeout,
         "geo": min(args.timeout, 10.0),
+        "web_check": 3.5,
     }
     # Синхронизировать print-timeout agy с таймаутом проверки, если не задан явно
     print_timeout = args.print_timeout

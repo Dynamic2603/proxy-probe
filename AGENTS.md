@@ -75,4 +75,9 @@
     - Бесшовная аутентификация через `gh auth token` (или `GITHUB_TOKEN` / `GH_TOKEN`), не требующая явного ввода секретов.
     - Выделенный модуль `proxy_probe/gist.py` (SRP, OCP, Anti-brittleness): сетевые сбои изолированы и не блокируют работу основного пайплайна.
     - Динамический пермалинк `https://gist.githubusercontent.com/<user>/<id>/raw/proxy-ok.txt` с TTL кэша 5 минут для регулярного автообновления в Throne.
+15. **Zero-Quota Geo Precheck и проверка веб-доступности (Web Capability)**:
+    - Ультра-быстрый предфильтр геоблоков Google через легковесный неаутентифицированный HTTP-запрос к `aistudio.google.com` (150–250мс) до захвата семафора и запуска тяжелого бинарника `agy`. При `403 Forbidden` / `User location is not supported` узел сразу маркируется `AGY-BLOCK`, экономя 100% индивидуальной квоты API и ускоряя отсев геоблоков на 95%.
+    - Управление предфильтром: CLI-флаги `--no-geo-precheck`, `--geo-precheck-timeout` (по умолчанию 2.5с).
+    - Ортогональный статус веб-доступности: `--check-web` тестирует `gemini.google.com` на наличие интерактивного челленджа Google CAPTCHA (`google.com/sorry`).
+    - Семантика и SSOT: капча на вебе не является блокировкой API (`AGY-OK`), сервер не дисквалифицируется, а получает информационный атрибут `web_status: "captcha"` и бейдж `[captcha]` в `formatted_tag` (`proxy-ok.txt`), консольной таблице и отчётах.
 

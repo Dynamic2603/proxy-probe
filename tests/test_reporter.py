@@ -630,25 +630,30 @@ def test_write_import_file_antidpi_detour(tmp_path: Path) -> None:
     )
 
     sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_direct, s_zapret])
-    assert sb_cnt == 3  # 2 сервера + 1 zapret-relay outbound
-    assert xr_cnt == 0
+    # s_direct остается в sing-box (1), а s_zapret конвертируется в Xray для Throne (1 узел + 1 zapret-relay = 2)
+    assert sb_cnt == 1
+    assert xr_cnt == 2
 
-    content = import_file.read_text(encoding="utf-8").strip()
-    data = json.loads(content)
-    assert len(data) == 3
+    lines = import_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    sb_data = json.loads(lines[0])
+    xr_data = json.loads(lines[1])
 
-    # Прямой сервер
-    direct_obj = next(d for d in data if d.get("server") == "1.1.1.1")
+    # Прямой сервер в sing-box
+    assert len(sb_data) == 1
+    direct_obj = sb_data[0]
+    assert direct_obj.get("server") == "1.1.1.1"
     assert "detour" not in direct_obj
     assert "[zapret" not in direct_obj.get("tag", "")
 
-    # Реанимированный сервер
-    zapret_obj = next(d for d in data if d.get("server") == "2.2.2.2")
-    assert zapret_obj.get("detour") == "zapret-relay"
+    # Реанимированный сервер сконвертирован в Xray для полной совместимости с Throne
+    assert len(xr_data) == 2
+    zapret_obj = next(d for d in xr_data if d.get("protocol") == "vless")
+    assert zapret_obj["streamSettings"]["sockopt"]["dialerProxy"] == "zapret-relay"
     assert "[zapret]" in zapret_obj.get("tag", "")
 
     # Объект zapret-relay
-    relay_obj = next(d for d in data if d.get("tag") == "zapret-relay")
-    assert relay_obj["type"] == "socks"
-    assert relay_obj["server_port"] == 10850
+    relay_obj = next(d for d in xr_data if d.get("tag") == "zapret-relay")
+    assert relay_obj["protocol"] == "socks"
+    assert relay_obj["settings"]["servers"][0]["port"] == 10850
 

@@ -5,6 +5,7 @@ from .engines import (
     build_singbox_config,
     build_xray_config,
     ensure_binaries,
+    singbox_to_xray_outbound,
     wait_port,
     xray_shorthand_to_v2ray,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "run_probe",
     "select_groups_interactive",
     "set_throne_dir",
+    "singbox_to_xray_outbound",
     "split_blocks",
     "sync_file_to_gist",
     "wait_port",

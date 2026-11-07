@@ -180,3 +180,48 @@ def test_wait_port_with_stop_event() -> None:
     stop_event = threading.Event()
     stop_event.set()
     assert wait_port(21001, None, timeout=10.0, stop_event=stop_event) is False
+
+
+def test_singbox_to_xray_outbound() -> None:
+    from proxy_probe.engines import singbox_to_xray_outbound
+
+    # 1. VLESS with WS and TLS
+    sb_vless = {
+        "type": "vless",
+        "tag": "test-vless",
+        "server": "1.2.3.4",
+        "server_port": 443,
+        "uuid": "test-uuid",
+        "tls": {
+            "enabled": True,
+            "server_name": "example.com",
+            "alpn": ["h2", "http/1.1"],
+            "utls": {"enabled": True, "fingerprint": "chrome"},
+        },
+        "transport": {"type": "ws", "path": "/ws", "headers": {"Host": "example.com"}},
+    }
+    xr_vless = singbox_to_xray_outbound(sb_vless)
+    assert xr_vless["protocol"] == "vless"
+    assert xr_vless["settings"]["vnext"][0]["address"] == "1.2.3.4"
+    assert xr_vless["settings"]["vnext"][0]["users"][0]["id"] == "test-uuid"
+    assert xr_vless["streamSettings"]["network"] == "ws"
+    assert xr_vless["streamSettings"]["wsSettings"]["path"] == "/ws"
+    assert xr_vless["streamSettings"]["security"] == "tls"
+    assert xr_vless["streamSettings"]["tlsSettings"]["serverName"] == "example.com"
+    assert xr_vless["streamSettings"]["tlsSettings"]["fingerprint"] == "chrome"
+
+    # 2. Trojan
+    sb_trojan = {
+        "type": "trojan",
+        "tag": "test-trojan",
+        "server": "5.6.7.8",
+        "server_port": 443,
+        "password": "pass",
+    }
+    xr_trojan = singbox_to_xray_outbound(sb_trojan)
+    assert xr_trojan["protocol"] == "trojan"
+    assert xr_trojan["settings"]["servers"][0]["password"] == "pass"
+
+    # 3. Non-convertible returns as-is
+    sb_hy2 = {"type": "hysteria2", "server": "1.1.1.1"}
+    assert singbox_to_xray_outbound(sb_hy2) == sb_hy2

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import json
 import shutil
@@ -8,6 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .engines import singbox_to_xray_outbound
 from .models import (
     RESULT_OK,
     STATE_ACTIVE,
@@ -146,7 +148,7 @@ def write_import_file(
     xr: list[dict] = []
 
     def _prepare_obj(srv: Server) -> dict:
-        obj = dict(srv.import_obj)
+        obj = copy.deepcopy(srv.import_obj)
         obj["tag"] = srv.formatted_tag
         return obj
 
@@ -183,6 +185,12 @@ def write_import_file(
             if not eng:
                 eng = "xray" if raw_obj.get("protocol") else "sing-box"
 
+            strat = entry.get("antidpi_strategy")
+            strat_val: int | None = int(strat) if strat and int(strat) > 0 else None
+            # Сервер идет через Zapret только если стратегия > 0 и узел не работает напрямую
+            if entry.get("direct_result") == RESULT_OK:
+                strat_val = None
+
             s = Server(
                 group_id=0,
                 group_name="",
@@ -200,7 +208,7 @@ def write_import_file(
                 org=str(entry.get("org", "")),
                 ingress_country_code=str(entry.get("ingress_country_code", "")),
                 ingress_ip=str(entry.get("ingress_ip", "")),
-                antidpi_strategy=entry.get("antidpi_strategy"),
+                antidpi_strategy=strat_val,
                 score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
                 state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
                 consecutive_fails=int(entry.get("consecutive_fails", 0)),
@@ -226,7 +234,17 @@ def write_import_file(
     for s in ok_servers:
         prepared = _prepare_obj(s)
         is_xray = s.engine == "xray" or (not s.engine and s.import_obj.get("protocol"))
-        if s.antidpi_strategy is not None:
+        is_zapret = bool(s.antidpi_strategy and s.antidpi_strategy > 0 and s.is_tcp_protocol)
+
+        if is_zapret:
+            # Для узлов sing-box, требующих Zapret, конвертируем в Xray:
+            # Throne блокирует detour в sing-box подписках, но полностью поддерживает dialerProxy в Xray (Вариант 2)
+            if not is_xray:
+                converted = singbox_to_xray_outbound(prepared)
+                if "protocol" in converted:
+                    prepared = converted
+                    is_xray = True
+
             if is_xray:
                 ss = prepared.setdefault("streamSettings", {})
                 sockopt = ss.setdefault("sockopt", {})
@@ -235,6 +253,14 @@ def write_import_file(
             else:
                 prepared["detour"] = "zapret-relay"
                 has_zapret_sb = True
+        else:
+            # Прямые серверы никогда не должны содержать detour / dialerProxy
+            prepared.pop("detour", None)
+            if (
+                isinstance(ss := prepared.get("streamSettings"), dict)
+                and isinstance(sockopt := ss.get("sockopt"), dict)
+            ):
+                sockopt.pop("dialerProxy", None)
 
         if is_xray:
             xr.append(prepared)

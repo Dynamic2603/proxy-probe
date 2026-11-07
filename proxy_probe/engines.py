@@ -359,6 +359,117 @@ def xray_shorthand_to_v2ray(o: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def singbox_to_xray_outbound(obj: dict[str, Any]) -> dict[str, Any]:
+    """Преобразует исходящий профиль sing-box в формат Xray (V2Ray) для совместимости с dialerProxy в Throne (SSOT)."""
+    proto = str(obj.get("type") or "").strip().lower()
+    if proto not in ("vless", "trojan", "shadowsocks", "vmess"):
+        return obj
+
+    host = str(obj.get("server") or "")
+    port = int(obj.get("server_port") or 0)
+    tag = str(obj.get("tag") or "")
+
+    ss: dict[str, Any] = {"network": "tcp", "security": "none"}
+
+    transport = obj.get("transport")
+    if isinstance(transport, dict):
+        t_type = str(transport.get("type") or "").lower()
+        if t_type == "ws":
+            ss["network"] = "ws"
+            ws_sett: dict[str, Any] = {}
+            if path := transport.get("path"):
+                ws_sett["path"] = path
+            if (headers := transport.get("headers")) and (host_h := headers.get("Host") or headers.get("host")):
+                ws_sett["headers"] = {"Host": host_h}
+            ss["wsSettings"] = ws_sett
+        elif t_type == "grpc":
+            ss["network"] = "grpc"
+            grpc_sett: dict[str, Any] = {}
+            if svc := transport.get("service_name"):
+                grpc_sett["serviceName"] = svc
+            ss["grpcSettings"] = grpc_sett
+        elif t_type in ("http", "h2"):
+            ss["network"] = "http"
+            http_sett: dict[str, Any] = {}
+            if path := transport.get("path"):
+                http_sett["path"] = path
+            if host_h := transport.get("host"):
+                http_sett["host"] = [host_h] if isinstance(host_h, str) else host_h
+            ss["httpSettings"] = http_sett
+
+    tls = obj.get("tls")
+    if isinstance(tls, dict) and tls.get("enabled", True):
+        reality = tls.get("reality")
+        if isinstance(reality, dict) and reality.get("enabled", True):
+            ss["security"] = "reality"
+            rs: dict[str, Any] = {
+                "serverName": tls.get("server_name") or host,
+                "publicKey": reality.get("public_key") or "",
+            }
+            if sid := reality.get("short_id"):
+                rs["shortId"] = sid
+            if (utls := tls.get("utls")) and isinstance(utls, dict) and (fp := utls.get("fingerprint")):
+                rs["fingerprint"] = fp
+            ss["realitySettings"] = rs
+        else:
+            ss["security"] = "tls"
+            ts: dict[str, Any] = {"serverName": tls.get("server_name") or host}
+            if alpn := tls.get("alpn"):
+                ts["alpn"] = alpn
+            if (utls := tls.get("utls")) and isinstance(utls, dict) and (fp := utls.get("fingerprint")):
+                ts["fingerprint"] = fp
+            if tls.get("insecure"):
+                ts["allowInsecure"] = True
+            ss["tlsSettings"] = ts
+
+    if proto == "vless":
+        user: dict[str, Any] = {
+            "id": obj.get("uuid") or "",
+            "encryption": "none",
+        }
+        if flow := obj.get("flow"):
+            user["flow"] = flow
+        return {
+            "protocol": "vless",
+            "tag": tag,
+            "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+            "streamSettings": ss,
+        }
+    elif proto == "trojan":
+        return {
+            "protocol": "trojan",
+            "tag": tag,
+            "settings": {"servers": [{"address": host, "port": port, "password": obj.get("password") or ""}]},
+            "streamSettings": ss,
+        }
+    elif proto == "shadowsocks":
+        return {
+            "protocol": "shadowsocks",
+            "tag": tag,
+            "settings": {"servers": [{
+                "address": host,
+                "port": port,
+                "method": obj.get("method") or "",
+                "password": obj.get("password") or "",
+            }]},
+            "streamSettings": ss,
+        }
+    elif proto == "vmess":
+        user = {
+            "id": obj.get("uuid") or "",
+            "alterId": int(obj.get("alter_id") or 0),
+            "security": obj.get("security") or "auto",
+        }
+        return {
+            "protocol": "vmess",
+            "tag": tag,
+            "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]},
+            "streamSettings": ss,
+        }
+
+    return obj
+
+
 def wait_port(
     port: int,
     proc: subprocess.Popen | None,

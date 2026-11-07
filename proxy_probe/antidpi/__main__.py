@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import cProfile
 import datetime as _dt
 import logging
+import pstats
 import sys
 import time
 
@@ -99,6 +101,13 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
     # Запускаем локальный релей
     relay_port = args.relay_port
+    workers = min(len(selected), getattr(args, "concurrency", 15))
+    probe_timeout = float(getattr(args, "timeout", 1.8))
+    enable_profile = bool(getattr(args, "profile", False))
+    profiler = cProfile.Profile() if enable_profile else None
+    if profiler:
+        profiler.enable()
+
     with ZapretRelay(port=relay_port):
         for idx, strat in enumerate(test_strategies, 1):
             print(f"[{idx}/{len(test_strategies)}] Тестирование S{strat.number:02d}: {strat.name[:45]}...")
@@ -112,10 +121,9 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                     time.sleep(0.3)
                     rescued = 0
                     latencies: list[int] = []
-                    workers = min(len(selected), 5)
                     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                         futs = {
-                            ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=2.5): srv
+                            ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=probe_timeout): srv
                             for srv in selected
                         }
                         for fut in concurrent.futures.as_completed(futs):
@@ -148,6 +156,17 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                     )
             except Exception as exc:
                 print(f"    -> Ошибка запуска стратегии S{strat.number:02d}: {exc}")
+
+    if profiler:
+        profiler.disable()
+        stats = pstats.Stats(profiler).strip_dirs()
+        print("\n" + "=" * 60)
+        print("### cProfile: Профилирование производительности бенчмарка")
+        print("=" * 60)
+        print("\n--- Топ-20 функций по CUMULATIVE TIME (общее время с подвызовами) ---")
+        stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(20)
+        print("\n--- Топ-15 функций по INTERNAL TIME (собственное процессорное время) ---")
+        stats.sort_stats(pstats.SortKey.TIME).print_stats(15)
 
     # Сортируем рейтинг
     ratings.sort(key=lambda r: (-r.rescued_count, -r.score, r.avg_latency_ms if r.avg_latency_ms > 0 else 99999))
@@ -246,6 +265,16 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_RELAY_PORT,
         help="Порт локального релея (по умолчанию 10850)",
+    )
+    p_bench.add_argument("--profile", action="store_true", help="Включить детальное профилирование через cProfile")
+    p_bench.add_argument(
+        "--timeout", type=float, default=1.8, help="Таймаут проверки прокси-туннеля (по умолчанию 1.8с)"
+    )
+    p_bench.add_argument(
+        "--concurrency",
+        type=int,
+        default=15,
+        help="Количество параллельных проверок серверов (по умолчанию 15)",
     )
     p_bench.set_defaults(func=cmd_benchmark)
 

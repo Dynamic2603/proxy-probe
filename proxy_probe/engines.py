@@ -372,11 +372,11 @@ def wait_port(
         if proc is not None and proc.poll() is not None:
             return False
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.15):
                 return True
         except OSError:
             pass
         if stop_event is not None and stop_event.is_set():
             return False
-        time.sleep(0.2)
+        time.sleep(0.02)
     return False

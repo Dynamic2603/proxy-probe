@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from proxy_probe.parsers import (
+    _parse_uri,
     decode_body,
     extract_host_port,
     extract_tag,
     link_to_outbound,
+    parse_subscription,
     split_blocks,
 )
 
@@ -145,3 +147,81 @@ def test_extract_host_port_wireguard() -> None:
     host, port = extract_host_port(wg_obj)
     assert host == "10.0.0.1"
     assert port == 51820
+
+
+def test_parse_uri_bracketed_passwords() -> None:
+    link = "trojan://p[ass]word@example.com:443?sni=example.com#Tag"
+    scheme, user, host, port, q, tag = _parse_uri(link)
+    assert scheme == "trojan"
+    assert user == "p[ass]word"
+    assert host == "example.com"
+    assert port == 443
+    assert q == {"sni": "example.com"}
+    assert tag == "Tag"
+
+    # Пароль полностью в скобках
+    scheme2, user2, host2, port2, _, _ = _parse_uri("trojan://[pass]@1.2.3.4:8443")
+    assert scheme2 == "trojan"
+    assert user2 == "[pass]"
+    assert host2 == "1.2.3.4"
+    assert port2 == 8443
+
+
+def test_parse_uri_bracketed_ipv4_and_domains() -> None:
+    # Нестандартный IPv4 в скобках
+    scheme, user, host, port, _, tag = _parse_uri("trojan://pass@[1.2.3.4]:443#TagIPv4")
+    assert scheme == "trojan"
+    assert user == "pass"
+    assert host == "1.2.3.4"
+    assert port == 443
+    assert tag == "TagIPv4"
+
+    # Нестандартный домен в скобках
+    scheme2, user2, host2, port2, _, _ = _parse_uri("trojan://pass@[domain.com]:8080")
+    assert scheme2 == "trojan"
+    assert user2 == "pass"
+    assert host2 == "domain.com"
+    assert port2 == 8080
+
+
+def test_parse_uri_ipv6_variants() -> None:
+    # 1. Стандартный bracketed IPv6
+    scheme1, user1, host1, port1, q1, _ = _parse_uri("trojan://pass@[2001:db8::1]:443?sni=test")
+    assert scheme1 == "trojan"
+    assert user1 == "pass"
+    assert host1 == "2001:db8::1"
+    assert port1 == 443
+    assert q1 == {"sni": "test"}
+
+    # 2. Необрамлённый IPv6 с портом
+    scheme2, user2, host2, port2, _, _ = _parse_uri("trojan://pass@2001:db8::1:443")
+    assert scheme2 == "trojan"
+    assert user2 == "pass"
+    assert host2 == "2001:db8::1"
+    assert port2 == 443
+
+    # 3. Непарные скобки — не должны вызывать исключений
+    _, _, host3, _, _, _ = _parse_uri("trojan://pass@[::1:443")
+    assert host3 != ""
+
+    _, _, host4, port4, _, _ = _parse_uri("trojan://pass@::1]:443")
+    assert host4 == "::1"
+    assert port4 == 443
+
+
+def test_parse_subscription_mixed_corrupt_and_valid() -> None:
+    text = "\n".join(
+        [
+            "trojan://[invalid#Broken1",
+            "vless://???#Broken2",
+            "trojan://p[ass]word@example.com:443?sni=example.com#ValidTrojan",
+            "not-a-valid-url-at-all",
+            "vless://uuid-1@1.2.3.4:443?security=reality&pbk=key#ValidVless",
+        ]
+    )
+    res = parse_subscription(text.encode("utf-8"))
+    assert len(res) == 2
+    assert res[0][1]["tag"] == "ValidTrojan"
+    assert res[0][1]["password"] == "p[ass]word"
+    assert res[1][1]["tag"] == "ValidVless"
+    assert res[1][1]["server"] == "1.2.3.4"

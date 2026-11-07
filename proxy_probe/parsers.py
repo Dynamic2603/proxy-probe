@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import urllib.parse
@@ -18,23 +19,57 @@ def _clean_alpn(val: str) -> list[str]:
 
 
 def _parse_uri(link: str) -> tuple[str, str, str, int, dict[str, str], str]:
-    u = urllib.parse.urlsplit(link.strip())
-    netloc = u.netloc
-    if "@" in netloc:
-        userpart, _, hostport = netloc.partition("@")
-        user = urllib.parse.unquote(userpart)
-    else:
-        user = urllib.parse.unquote(u.username or "")
-        hostport = netloc
-    if ":" in hostport:
-        parts = hostport.rsplit(":", 1)
-        host = parts[0]
-        port = int(parts[1]) if parts[1].isdigit() else 0
-    else:
-        host, port = hostport, 0
-    q = dict(urllib.parse.parse_qsl(u.query, keep_blank_values=True))
-    tag = urllib.parse.unquote(u.fragment or "")
-    return u.scheme.lower(), user, host.strip("[]"), port, q, tag
+    """Надёжный парсер proxy URI (vless, trojan, hysteria2, shadowsocks).
+
+    В отличие от стандартного urllib.parse.urlsplit, устойчив к:
+    - паролям и именам с квадратными скобками (p[ass]word),
+    - нестандартным bracketed-хостам ([1.2.3.4], [domain.com]),
+    - непарным скобкам в netloc,
+    - IPv6 адресам без квадратных скобок,
+    - повреждённым URL-строкам.
+    """
+    try:
+        raw = link.strip()
+        raw, _, fragment = raw.partition("#")
+        raw, _, query_str = raw.partition("?")
+        scheme, sep, rest = raw.partition("://")
+        if not sep:
+            return "", "", "", 0, {}, ""
+
+        rest, _, path = rest.partition("/")
+        user = ""
+        hostport = rest
+        if "@" in rest:
+            userpart, _, hostport = rest.rpartition("@")
+            user = urllib.parse.unquote(userpart)
+
+        host = ""
+        port = 0
+        if hostport.startswith("["):
+            h, _, p = hostport[1:].partition("]")
+            host = h
+            if p.startswith(":"):
+                port = int(p[1:]) if p[1:].isdigit() else 0
+        elif ":" in hostport:
+            h, _, p = hostport.rpartition(":")
+            if p.isdigit():
+                host = h
+                port = int(p)
+            else:
+                host = hostport
+                port = 0
+        else:
+            host = hostport
+            port = 0
+
+        clean_host = host.strip("[]")
+        q = dict(urllib.parse.parse_qsl(query_str, keep_blank_values=True))
+        if path and not q.get("path"):
+            q["path"] = "/" + path
+        tag = urllib.parse.unquote(fragment)
+        return scheme.lower(), user, clean_host, port, q, tag
+    except Exception:
+        return "", "", "", 0, {}, ""
 
 
 def _build_transport(net: str, q: dict[str, str]) -> dict[str, Any] | None:
@@ -263,18 +298,21 @@ def parse_vmess(link: str) -> tuple[str, dict]:
 
 
 def link_to_outbound(link: str) -> tuple[str, dict]:
-    phrase = link.strip()
-    if phrase.startswith("vless://"):
-        return parse_vless(phrase)
-    if phrase.startswith(("hy2://", "hysteria2://")):
-        return parse_hysteria2(phrase)
-    if phrase.startswith("ss://"):
-        return parse_shadowsocks(phrase)
-    if phrase.startswith("trojan://"):
-        return parse_trojan(phrase)
-    if phrase.startswith("vmess://"):
-        return parse_vmess(phrase)
-    return "sing-box", {}
+    try:
+        phrase = link.strip()
+        if phrase.startswith("vless://"):
+            return parse_vless(phrase)
+        if phrase.startswith(("hy2://", "hysteria2://")):
+            return parse_hysteria2(phrase)
+        if phrase.startswith("ss://"):
+            return parse_shadowsocks(phrase)
+        if phrase.startswith("trojan://"):
+            return parse_trojan(phrase)
+        if phrase.startswith("vmess://"):
+            return parse_vmess(phrase)
+        return "sing-box", {}
+    except Exception:
+        return "sing-box", {}
 
 
 def split_blocks(text: str) -> list[str]:
@@ -344,8 +382,11 @@ def parse_outbound_doc(doc: str) -> list[tuple[str, dict]]:
                     res.append(("sing-box", o))
         return res
     if "://" in doc:
-        eng, obj = link_to_outbound(doc)
-        return [(eng, obj)] if obj else []
+        try:
+            eng, obj = link_to_outbound(doc)
+            return [(eng, obj)] if obj else []
+        except Exception:
+            return []
     return []
 
 
@@ -353,7 +394,8 @@ def parse_subscription(data: bytes) -> list[tuple[str, dict]]:
     text = decode_body(data)
     res: list[tuple[str, dict]] = []
     for block in split_blocks(text):
-        res.extend(parse_outbound_doc(block))
+        with contextlib.suppress(Exception):
+            res.extend(parse_outbound_doc(block))
     return res
 
 

@@ -303,3 +303,89 @@ def test_execute_probe_pool_stage0_log_semantics() -> None:
     # Проверяем семантику: 2 сервера, 1 узел
     assert any("отсеяно 2 серверов (1 узлов)" in line for line in printed_lines)
 
+
+def test_cli_parser_optimization_flags() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(["--preflight-timeout", "2.0", "--no-rep-filter"])
+    assert args.preflight_timeout == 2.0
+    assert args.no_rep_filter is True
+
+
+def test_execute_probe_pool_representative_filter_dead() -> None:
+    s1 = Server(1, "g", "s1", "sing-box", "1.2.3.4", 443, {}, "fresh")
+    s2 = Server(1, "g", "s2", "sing-box", "1.2.3.4", 443, {}, "fresh")
+    s3 = Server(1, "g", "s3", "sing-box", "1.2.3.4", 443, {}, "fresh")
+
+    class FakeCtx:
+        xr_exe = "fake_xr"
+        sb_exe = "fake_sb"
+        agy_bin = "fake_agy"
+        use_tcp_prefilter = False
+        use_rep_filter = True
+        initial_circuit_breaker = None
+
+    mock_dead_result = {
+        "result": RESULT_DEAD,
+        "country": "",
+        "ip_out": "",
+        "latency_ms": 2500,
+        "note": "preflight: туннель не пропускает трафик",
+    }
+
+    with patch("proxy_probe.cli._probe_worker", return_value=mock_dead_result) as mock_worker:
+        completed, interrupted = _execute_probe_pool(
+            to_probe=[s1, s2, s3],
+            jobs=1,
+            timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
+            ctx=FakeCtx(),  # type: ignore[arg-type]
+            print_timeout="5s",
+        )
+
+    assert interrupted is False
+    assert completed == 3
+    # Движок должен запуститься строго 1 раз (для представителя), а остальные 2 отсеяться автоматически
+    assert mock_worker.call_count == 1
+    assert s1.result == RESULT_DEAD
+    assert s2.result == RESULT_DEAD
+    assert s3.result == RESULT_DEAD
+    assert "отсев по узлу" in s2.note
+    assert "отсев по узлу" in s3.note
+
+
+def test_execute_probe_pool_representative_filter_alive() -> None:
+    s1 = Server(1, "g", "s1", "sing-box", "1.2.3.4", 443, {}, "fresh")
+    s2 = Server(1, "g", "s2", "sing-box", "1.2.3.4", 443, {}, "fresh")
+
+    class FakeCtx:
+        xr_exe = "fake_xr"
+        sb_exe = "fake_sb"
+        agy_bin = "fake_agy"
+        use_tcp_prefilter = False
+        use_rep_filter = True
+        initial_circuit_breaker = None
+
+    mock_ok_result = {
+        "result": RESULT_OK,
+        "country": "US",
+        "ip_out": "1.2.3.4",
+        "latency_ms": 150,
+        "note": "ok",
+    }
+
+    with patch("proxy_probe.cli._probe_worker", return_value=mock_ok_result) as mock_worker:
+        completed, interrupted = _execute_probe_pool(
+            to_probe=[s1, s2],
+            jobs=1,
+            timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
+            ctx=FakeCtx(),  # type: ignore[arg-type]
+            print_timeout="5s",
+        )
+
+    assert interrupted is False
+    assert completed == 2
+    # Для живого узла должны провериться оба профиля
+    assert mock_worker.call_count == 2
+    assert s1.result == RESULT_OK
+    assert s2.result == RESULT_OK
+
+

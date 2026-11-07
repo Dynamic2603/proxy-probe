@@ -30,7 +30,6 @@ from .orchestrator import (
     gather_sources,
     interactive_select,
     pause_on_exit,
-    run_dir,
 )
 from .parsers import parse_subscription
 from .prober import (
@@ -67,12 +66,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="pxp",
         description="proxy-probe (pxp): проверка серверов подписок на работу с целевыми утилитами (agy/Gemini)",
     )
-    default_jobs = max(1, os.cpu_count() or 1)
+    cpu_n = os.cpu_count() or 4
+    default_jobs = min(32, max(8, cpu_n * 2))
     ap.add_argument(
         "--jobs",
         type=int,
         default=default_jobs,
-        help=f"число параллельных проверок (по умолчанию CPU = {default_jobs})",
+        help=f"число параллельных проверок (по умолчанию {default_jobs})",
     )
     ap.add_argument("--subset", type=int, default=0, help="проверить только первые N серверов (0 = все)")
     ap.add_argument("--group", type=int, action="append", default=[], help="id группы (можно несколько; иначе — выбор)")
@@ -161,6 +161,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=100,
         help="число параллельных потоков L4 TCP-фильтра (по умолчанию 100)",
     )
+    ap.add_argument(
+        "--preflight-timeout",
+        type=float,
+        default=2.5,
+        help="таймаут HTTP preflight-проверки туннеля (сек, по умолчанию 2.5)",
+    )
+    ap.add_argument(
+        "--no-rep-filter",
+        action="store_true",
+        help="отключить предварительную фильтрацию хостов по представителям эндпоинтов",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -194,6 +205,8 @@ class RuntimeContext:
     use_tcp_prefilter: bool = True
     tcp_timeout: float = 1.5
     tcp_concurrency: int = 100
+    preflight_timeout: float = 2.5
+    use_rep_filter: bool = True
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -263,6 +276,8 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         use_tcp_prefilter=not getattr(args, "no_tcp_prefilter", False),
         tcp_timeout=float(getattr(args, "tcp_timeout", 1.5)),
         tcp_concurrency=int(getattr(args, "tcp_concurrency", 100)),
+        preflight_timeout=float(getattr(args, "preflight_timeout", 2.5)),
+        use_rep_filter=not getattr(args, "no_rep_filter", False),
     )
 
 
@@ -337,7 +352,6 @@ def _probe_worker(
     bin_path: str,
     is_xray: bool,
     import_obj: dict[str, Any],
-    run_root: Path,
     timeouts: dict[str, float],
     agy_bin: str,
     print_timeout: str,
@@ -346,28 +360,24 @@ def _probe_worker(
     circuit_breaker: QuotaCircuitBreaker | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
+    run_root: Path | None = None,
 ) -> dict[str, Any]:
     port = alloc_port()
-    try:
-        return run_probe(
-            engine_bin=bin_path,
-            is_xray=is_xray,
-            import_obj=import_obj,
-            port=port,
-            run_root=run_root,
-            timeouts=timeouts,
-            agy_bin=agy_bin,
-            print_timeout=print_timeout,
-            agy_model=agy_model,
-            agy_semaphore=agy_semaphore,
-            circuit_breaker=circuit_breaker,
-            stop_event=stop_event,
-            registry=registry,
-        )
-    finally:
-        d = run_root / f"p{port}"
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
+    return run_probe(
+        engine_bin=bin_path,
+        is_xray=is_xray,
+        import_obj=import_obj,
+        port=port,
+        run_root=run_root,
+        timeouts=timeouts,
+        agy_bin=agy_bin,
+        print_timeout=print_timeout,
+        agy_model=agy_model,
+        agy_semaphore=agy_semaphore,
+        circuit_breaker=circuit_breaker,
+        stop_event=stop_event,
+        registry=registry,
+    )
 
 
 def _execute_probe_pool(
@@ -387,7 +397,6 @@ def _execute_probe_pool(
 
     # Счётчик результатов проверки движками (изолирован от кэша и Stage 0)
     engine_counts: Counter[str] = Counter()
-    run_root = run_dir()
     registry = ProcessRegistry()
     stop_event = threading.Event()
     concurrency = getattr(ctx, "agy_concurrency", 2)
@@ -450,28 +459,8 @@ def _execute_probe_pool(
     if not to_probe_engine or stop_event.is_set():
         return completed_count, interrupted
 
-    # Stage 1: Полноценная проверка через движки sing-box / Xray
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
-    futures: dict[concurrent.futures.Future[Any], Server] = {}
-    for s in to_probe_engine:
-        bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
-        fut = ex.submit(
-            _probe_worker,
-            bin_path,
-            s.engine == "xray",
-            s.import_obj,
-            run_root,
-            timeouts,
-            ctx.agy_bin,
-            print_timeout,
-            agy_model=model,
-            agy_semaphore=agy_semaphore,
-            circuit_breaker=cb,
-            stop_event=stop_event,
-            registry=registry,
-        )
-        futures[fut] = s
-
+    # Stage 1: Полноценная проверка через движки sing-box / Xray (In-Memory)
+    use_rep_filter = getattr(ctx, "use_rep_filter", True)
     total = len(to_probe_engine)
     pbar = tqdm(
         total=total,
@@ -481,34 +470,89 @@ def _execute_probe_pool(
     )
     pbar.set_postfix_str(format_live_counters(engine_counts), refresh=True)
 
+    def _apply_result(server: Server, future: concurrent.futures.Future[Any]) -> None:
+        nonlocal completed_count
+        try:
+            probe_res: dict[str, Any] = future.result()
+        except Exception as e:
+            server.result = RESULT_UNKNOWN
+            server.note = f"ошибка: {e}"
+        else:
+            server.result = probe_res["result"]
+            server.country = probe_res.get("country", "")
+            server.ip_out = probe_res.get("ip_out", "")
+            server.latency_ms = probe_res.get("latency_ms", 0)
+            server.note = probe_res.get("note", "")
+        completed_count += 1
+        engine_counts[server.result] += 1
+        pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
+        pbar.update(1)
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+
+    def _submit_server(server: Server) -> concurrent.futures.Future[Any]:
+        bin_path = str(ctx.xr_exe if server.engine == "xray" else ctx.sb_exe)
+        return ex.submit(
+            _probe_worker,
+            bin_path,
+            server.engine == "xray",
+            server.import_obj,
+            timeouts,
+            ctx.agy_bin,
+            print_timeout,
+            agy_model=model,
+            agy_semaphore=agy_semaphore,
+            circuit_breaker=cb,
+            stop_event=stop_event,
+            registry=registry,
+        )
+
     try:
-        for _i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
-            s = futures[fut]
-            try:
-                probe_res: dict[str, Any] = fut.result()
-            except Exception as e:
+        if use_rep_filter:
+            ep_to_servers: dict[tuple[str, int], list[Server]] = {}
+            for s in to_probe_engine:
+                ep_to_servers.setdefault((s.server, s.server_port), []).append(s)
+
+            representatives = [srvs[0] for srvs in ep_to_servers.values()]
+            siblings_map = {ep: srvs[1:] for ep, srvs in ep_to_servers.items() if len(srvs) > 1}
+            surviving_siblings: list[Server] = []
+
+            # 1a: Проверка представителей уникальных узлов
+            fut_map = {_submit_server(s): s for s in representatives}
+            for fut in concurrent.futures.as_completed(fut_map):
+                s = fut_map[fut]
                 if stop_event.is_set():
                     break
-                s.result = RESULT_UNKNOWN
-                s.note = f"ошибка: {e}"
-                completed_count += 1
-                engine_counts[s.result] += 1
-                pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
-                pbar.update(1)
-                continue
+                _apply_result(s, fut)
+                ep = (s.server, s.server_port)
+                if ep in siblings_map:
+                    if s.result == RESULT_DEAD:
+                        for sib in siblings_map[ep]:
+                            sib.result = RESULT_DEAD
+                            sib.latency_ms = s.latency_ms
+                            sib.note = f"отсев по узлу ({s.note})"
+                            completed_count += 1
+                            engine_counts[RESULT_DEAD] += 1
+                            pbar.update(1)
+                        pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
+                    else:
+                        surviving_siblings.extend(siblings_map[ep])
 
-            if stop_event.is_set():
-                break
-
-            s.result = probe_res["result"]
-            s.country = probe_res.get("country", "")
-            s.ip_out = probe_res.get("ip_out", "")
-            s.latency_ms = probe_res.get("latency_ms", 0)
-            s.note = probe_res.get("note", "")
-            completed_count += 1
-            engine_counts[s.result] += 1
-            pbar.set_postfix_str(format_live_counters(engine_counts), refresh=False)
-            pbar.update(1)
+            # 1b: Проверка оставшихся профилей для живых узлов
+            if surviving_siblings and not stop_event.is_set():
+                fut_map2 = {_submit_server(s): s for s in surviving_siblings}
+                for fut in concurrent.futures.as_completed(fut_map2):
+                    s = fut_map2[fut]
+                    if stop_event.is_set():
+                        break
+                    _apply_result(s, fut)
+        else:
+            fut_map = {_submit_server(s): s for s in to_probe_engine}
+            for fut in concurrent.futures.as_completed(fut_map):
+                s = fut_map[fut]
+                if stop_event.is_set():
+                    break
+                _apply_result(s, fut)
     except KeyboardInterrupt:
         interrupted = True
         msg = (
@@ -624,7 +668,7 @@ def main() -> None:
     servers, to_probe, cached_counts, cached_unique_hosts, warnings = selection
     timeouts = {
         "start": min(args.timeout, 12.0),
-        "preflight": 4.0,
+        "preflight": args.preflight_timeout,
         "probe": args.timeout,
         "geo": min(args.timeout, 10.0),
     }

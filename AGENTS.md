@@ -102,7 +102,7 @@
     - Прозрачная маршрутизация (Detour) в `proxy-ok.txt`:
       - Для sing-box: `"detour": "zapret-relay"` + инъекция релея в `outbounds`.
       - Для Xray: `"proxySettings": {"tag": "zapret-relay"}` + инъекция релея в `outbounds`.
-      - Индикация в теге: `[zapret:S01]` фиксирует конкретный номер стратегии, спасшей узел.
+      - Индикация в теге: `[zapret]` обозначает серверы, маршрутизируемые через локальный Zapret-релей.
     - Бесшовное автоповышение прав UAC (Windows Seamless UAC Auto-Elevation):
       - Модуль `proxy_probe/antidpi/elevation.py`: при запуске команд `benchmark` или `serve` без прав Администратора автоматически вызывается системный диалог Windows UAC (`ShellExecuteExW` с `lpVerb = "runas"`).
       - Пользователю достаточно нажать «Да» в стандартном системном окне Windows.

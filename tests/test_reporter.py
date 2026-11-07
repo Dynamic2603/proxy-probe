@@ -645,7 +645,7 @@ def test_write_import_file_antidpi_detour(tmp_path: Path) -> None:
     # Реанимированный сервер
     zapret_obj = next(d for d in data if d.get("server") == "2.2.2.2")
     assert zapret_obj.get("detour") == "zapret-relay"
-    assert "[zapret:S01]" in zapret_obj.get("tag", "")
+    assert "[zapret]" in zapret_obj.get("tag", "")
 
     # Объект zapret-relay
     relay_obj = next(d for d in data if d.get("tag") == "zapret-relay")

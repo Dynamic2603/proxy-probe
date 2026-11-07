@@ -442,11 +442,10 @@ def _run_serve(args: argparse.Namespace) -> int:
     cleanup_stale_windivert_service(zapret_dir)
 
     print("Запуск изолированного Zapret2-релея:")
-    print(f"  - Порт релея: {DEFAULT_RELAY_HOST}:{args.port} (SOCKS5)")
+    print(f"  - Порт: {DEFAULT_RELAY_HOST}:{args.port} (SOCKS5)")
     print(f"  - Стратегия: S{strat.number:02d} ({strat.name})")
-    print(f"  - Защищенный белый список WinDivert: {len(target_ips)} целевых IP серверов")
-    print("  - Системный трафик (игры, браузеры, банки): 100% МИМО WinDivert")
-    print("\nНажмите Ctrl+C для остановки релея...")
+    print(f"  - Целевых серверов в фильтре WinDivert: {len(target_ips)}")
+    print("\nДля остановки нажмите Ctrl+C...")
 
     try:
         with (

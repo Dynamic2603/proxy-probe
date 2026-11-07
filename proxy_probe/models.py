@@ -191,7 +191,7 @@ class Server:
         if self.web_status == WEB_STATUS_CAPTCHA:
             badge = f"{badge}[captcha]" if badge else "[captcha]"
         if self.antidpi_strategy is not None:
-            zapret_badge = f"[zapret:S{self.antidpi_strategy:02d}]"
+            zapret_badge = "[zapret]"
             badge = f"{badge}{zapret_badge}" if badge else zapret_badge
         return badge
 

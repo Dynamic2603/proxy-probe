@@ -19,10 +19,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from tqdm import tqdm
 
 from .cache import ResultCache, default_cache_path
 from .engines import alloc_port, ensure_binaries
+from .gist import resolve_gist_id, sync_file_to_gist
 from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
 from .orchestrator import (
     dedupe_servers,
@@ -184,6 +186,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=20,
         help="максимальное число строк в итоговой таблице консоли (0 = без ограничений, по умолчанию 20)",
     )
+    ap.add_argument(
+        "--gist",
+        dest="gist_id",
+        metavar="ID",
+        default=None,
+        help="ID GitHub Secret Gist для автоматической публикации proxy-ok.txt (или переменная PROXY_PROBE_GIST_ID)",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -221,6 +230,7 @@ class RuntimeContext:
     use_rep_filter: bool = True
     table_mode: str = "ok"
     table_limit: int = 20
+    gist_id: str | None = None
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -279,6 +289,10 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     sb_exe, xr_exe = ensure_binaries(ver_sb, ver_xr, force=False)
     print(f"Движки: {sb_exe}, {xr_exe}")
 
+    gist_id = resolve_gist_id(getattr(args, "gist_id", None))
+    if gist_id:
+        print(f"Синхронизация Gist: включена (ID: {gist_id})")
+
     return RuntimeContext(
         agy_bin=agy_bin,
         agy_model=agy_model,
@@ -300,6 +314,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         use_rep_filter=not getattr(args, "no_rep_filter", False),
         table_mode=str(getattr(args, "table", "ok")),
         table_limit=int(getattr(args, "table_limit", 20)),
+        gist_id=gist_id,
     )
 
 
@@ -635,6 +650,7 @@ def _finalize_and_report(
             f"принудительная перепроверка — запуск с --refresh-cache."
         )
 
+    stats = compute_summary_stats(servers)
     write_report(
         servers,
         ctx.report_path,
@@ -645,10 +661,14 @@ def _finalize_and_report(
         cached_counts=cached_counts,
         cache_note=cache_note,
         cached_unique_hosts=cached_unique_hosts,
+        stats=stats,
     )
     nb, nx = write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
 
-    stats = compute_summary_stats(servers)
+    gist_res = None
+    if ctx.gist_id:
+        gist_res = sync_file_to_gist(ctx.import_path, ctx.gist_id)
+
     print_results_table(servers, mode=ctx.table_mode, limit=ctx.table_limit)
     print_summary_panel(
         servers,
@@ -660,10 +680,12 @@ def _finalize_and_report(
         dt,
         cached_unique_hosts=cached_unique_hosts,
         stats=stats,
+        gist_res=gist_res,
     )
 
 
 def main() -> None:
+    load_dotenv()
     args = build_arg_parser().parse_args()
 
     if args.throne_dir:

@@ -35,7 +35,26 @@ uv run pxp --jobs 8 --no-pause
 
 # Force recheck all servers bypassing cache
 uv run pxp --refresh-cache
+
+# Automatically publish verified proxies to a GitHub Secret Gist
+uv run pxp --gist <GIST_ID>
 ```
+
+---
+
+## Configuration via `.env`
+
+Copy `.env.example` to `.env` to configure persistent environment variables:
+```bash
+copy .env.example .env
+```
+Supported variables:
+- `PROXY_PROBE_GIST_ID`: GitHub Secret Gist ID for automatic remote subscription delivery.
+- `GITHUB_TOKEN`: GitHub Personal Access Token (optional; defaults to `gh auth token` from GitHub CLI).
+- `AGY_BIN`: Path to `agy.exe`.
+- `AGY_MODEL`: Specific Gemini model preference (e.g. `gemini-2.5-flash-lite`).
+- `THRONE_DIR`: Custom path to Throne data directory.
+- `PROXY_PROBE_BIN_DIR`: Custom binary directory for engine caches.
 
 ---
 
@@ -69,6 +88,7 @@ uv run pxp --refresh-cache
 
 ## Connecting `proxy-ok.txt` as a Subscription in Throne
 
+### Option A: Local File Subscription (Same PC)
 Instead of manual one-time imports, `proxy-ok.txt` can be linked as an auto-updating local subscription (without setting up a local web server):
 
 1. In Throne: **Groups** -> **Add Group**.
@@ -77,6 +97,22 @@ Instead of manual one-time imports, `proxy-ok.txt` can be linked as an auto-upda
    - **Type**: `Subscription`
    - **Subscription URL**: `file:///C:/path/to/proxy-probe/proxy-ok.txt` *(replace with your system's absolute path; note the three slashes `file:///` before drive letter on Windows)*.
 3. Clicking **Update** prompts Throne to read the local file via Qt's file engine (`QNetworkReplyFileImpl`) and automatically synchronize profiles (pruning invalid nodes and adding working ones).
+
+### Option B: Remote Delivery via GitHub Secret Gist (Zero-Server Remote Sync)
+To deliver verified proxies to mobile devices, laptops, or remote PCs without running web servers:
+
+1. **Create a Secret Gist (once)**:
+   ```bash
+   gh gist create proxy-ok.txt --desc "Throne Proxy Pool"
+   ```
+   *(GitHub CLI creates an unlisted Secret Gist with a 128-bit hash ID, e.g. `5b0e0062eb8e9654adad7bb1d81cc75f`).*
+2. **Configure auto-sync**:
+   Set `PROXY_PROBE_GIST_ID=<GIST_ID>` in `.env` (or pass `--gist <GIST_ID>`).
+   Every `pxp` run will automatically push the latest `proxy-ok.txt` to the Gist.
+3. **In Throne on any device**:
+   - **Subscription URL**: `https://gist.githubusercontent.com/<username>/<gist_id>/raw/proxy-ok.txt`
+   - **Update Interval**: e.g., 30 or 60 minutes.
+   - GitHub Fastly CDN caches this dynamic permalink for 5 minutes (`max-age=300`), ensuring all devices receive the latest verified proxies automatically.
 
 ---
 

@@ -22,6 +22,8 @@ def _make_server(
     country: str = "Германия",
     note: str = "",
     state: str = STATE_ACTIVE,
+    org: str = "",
+    score: int = 70,
 ) -> Server:
     return Server(
         group_id=gid,
@@ -39,6 +41,8 @@ def _make_server(
         country=country,
         note=note,
         state=state,
+        org=org,
+        score=score,
     )
 
 
@@ -53,6 +57,7 @@ def test_compute_summary_stats_empty() -> None:
     assert stats.latency_avg == 0
     assert stats.group_stats == []
     assert stats.failure_reasons == []
+    assert stats.org_stats == []
 
 
 def test_compute_summary_stats_latency_and_geo() -> None:
@@ -133,3 +138,36 @@ def test_compute_summary_stats_includes_degraded_nodes() -> None:
     # Latencies should include s_ok and s_deg (80 and 120 -> avg 100)
     assert stats.latency_avg == 100
     assert stats.latency_min == 80
+
+
+def test_compute_summary_stats_org_ranking() -> None:
+    # Org A: 2 OK servers (avg 60ms, score 90, countries DE, FI)
+    s1 = _make_server(1, result=RESULT_OK, latency_ms=50, score=90, country_code="DE", org="Hosting Alpha")
+    s2 = _make_server(2, result=RESULT_OK, latency_ms=70, score=90, country_code="FI", org="Hosting Alpha")
+    s3 = _make_server(3, result=RESULT_DEAD, latency_ms=0, score=0, country_code="DE", org="Hosting Alpha")
+
+    # Org B: 1 OK server (avg 120ms, score 70, country NL)
+    s4 = _make_server(4, result=RESULT_OK, latency_ms=120, score=70, country_code="NL", org="Hosting Beta")
+
+    # Empty org: should be ignored or not crash
+    s5 = _make_server(5, result=RESULT_OK, latency_ms=80, org="")
+
+    stats = compute_summary_stats([s1, s2, s3, s4, s5])
+    assert len(stats.org_stats) == 2
+    # Leader is Hosting Alpha (2 OK)
+    org_a = stats.org_stats[0]
+    assert org_a.org_name == "Hosting Alpha"
+    assert org_a.ok_count == 2
+    assert org_a.total_count == 3
+    assert org_a.avg_latency_ms == 60
+    assert org_a.avg_score == 90
+    assert org_a.countries == ["DE", "FI"]
+
+    # Second is Hosting Beta (1 OK)
+    org_b = stats.org_stats[1]
+    assert org_b.org_name == "Hosting Beta"
+    assert org_b.ok_count == 1
+    assert org_b.total_count == 1
+    assert org_b.avg_latency_ms == 120
+    assert org_b.avg_score == 70
+    assert org_b.countries == ["NL"]

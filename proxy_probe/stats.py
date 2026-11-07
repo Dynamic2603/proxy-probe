@@ -12,6 +12,7 @@ from .models import (
     RESULT_OK,
     STATE_DEGRADED,
     Server,
+    normalize_org_name,
 )
 
 
@@ -33,6 +34,16 @@ class GroupStat:
 
 
 @dataclasses.dataclass(frozen=True)
+class OrgStat:
+    org_name: str
+    ok_count: int
+    total_count: int
+    avg_latency_ms: int
+    avg_score: int
+    countries: list[str]
+
+
+@dataclasses.dataclass(frozen=True)
 class SummaryStats:
     total: int
     tested: int
@@ -43,6 +54,7 @@ class SummaryStats:
     latency_avg: int
     group_stats: list[GroupStat]
     failure_reasons: list[tuple[str, int]]
+    org_stats: list[OrgStat] = dataclasses.field(default_factory=list)
 
 
 def _classify_failure(server: Server) -> str:
@@ -150,6 +162,37 @@ def compute_summary_stats(servers: list[Server]) -> SummaryStats:
     failure_counter = Counter(_classify_failure(s) for s in failed_servers)
     failure_reasons = failure_counter.most_common(6)
 
+    # 6. Рейтинг хостинг-провайдеров (дата-центров / ISP)
+    orgs_map: dict[str, list[Server]] = {}
+    for s in servers:
+        clean_org = normalize_org_name(s.org)
+        if clean_org:
+            orgs_map.setdefault(clean_org, []).append(s)
+
+    org_stats: list[OrgStat] = []
+    for org_name, org_servers in orgs_map.items():
+        ok_servers = [s for s in org_servers if s.result == RESULT_OK or s.state == STATE_DEGRADED]
+        ok_cnt = len(ok_servers)
+        lats = [s.latency_ms for s in ok_servers if s.latency_ms > 0]
+        avg_l = int(sum(lats) / len(lats)) if lats else 0
+        scores = [s.score for s in ok_servers if s.score > 0]
+        avg_s = int(sum(scores) / len(scores)) if scores else 0
+        countries = sorted(list({s.country_code.upper() for s in ok_servers if s.country_code}))
+        org_stats.append(
+            OrgStat(
+                org_name=org_name,
+                ok_count=ok_cnt,
+                total_count=len(org_servers),
+                avg_latency_ms=avg_l,
+                avg_score=avg_s,
+                countries=countries,
+            )
+        )
+    # Сортировка: больше рабочих узлов -> меньше задержка -> выше скор -> по имени
+    org_stats.sort(
+        key=lambda o: (-o.ok_count, o.avg_latency_ms if o.ok_count > 0 else 999999, -o.avg_score, o.org_name)
+    )
+
     return SummaryStats(
         total=total,
         tested=tested,
@@ -160,4 +203,5 @@ def compute_summary_stats(servers: list[Server]) -> SummaryStats:
         latency_avg=lat_avg,
         group_stats=group_stats,
         failure_reasons=failure_reasons,
+        org_stats=org_stats,
     )

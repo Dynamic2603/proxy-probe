@@ -138,6 +138,7 @@ def test_print_summary_panel_renders_stats() -> None:
         latency_ms=90,
         country_code="DE",
         country="Германия",
+        org="Hetzner Online GmbH",
     )
     s2 = Server(
         1,
@@ -170,3 +171,5 @@ def test_print_summary_panel_renders_stats() -> None:
         assert "DE (Германия)" in panel_text
         assert "L4 TCP недоступен" in panel_text
         assert "Задержка (AGY-OK)" in panel_text
+        assert "Хостинг-провайдеры" in panel_text
+        assert "Hetzner Online GmbH" in panel_text

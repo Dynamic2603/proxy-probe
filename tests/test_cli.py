@@ -402,3 +402,16 @@ def test_execute_probe_pool_representative_filter_alive() -> None:
     assert s2.result == RESULT_OK
 
 
+def test_main_calls_load_dotenv() -> None:
+    with patch("proxy_probe.cli.load_dotenv") as mock_load_dotenv, \
+         patch("proxy_probe.cli.build_arg_parser") as mock_parser:
+        mock_parser.return_value.parse_args.side_effect = SystemExit(0)
+        try:
+            from proxy_probe.cli import main
+            main()
+        except SystemExit:
+            pass
+        mock_load_dotenv.assert_called_once()
+
+
+

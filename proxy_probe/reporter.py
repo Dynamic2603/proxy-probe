@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import RESULT_OK, STATE_ACTIVE, STATE_DEGRADED, Server
+from .stats import SummaryStats, compute_summary_stats
 
 if TYPE_CHECKING:
     from .cache import ResultCache
@@ -23,7 +24,10 @@ def write_report(
     cached_counts: dict[str, int] | None = None,
     cache_note: str = "",
     cached_unique_hosts: dict[str, set[str]] | None = None,
+    stats: SummaryStats | None = None,
 ) -> None:
+    if stats is None:
+        stats = compute_summary_stats(servers)
     counts = Counter(s.result for s in servers if s.result)
     tested_count = sum(1 for s in servers if s.result)
     server_stat = f"{tested_count} из {len(servers)} (прервано)" if tested_count < len(servers) else f"{len(servers)}"
@@ -65,6 +69,29 @@ def write_report(
     )
     if cache_note:
         lines.append(f"- {cache_note}\n")
+
+    ok_orgs = [o for o in stats.org_stats if o.ok_count > 0]
+    if ok_orgs:
+        lines.append("\n## Рейтинг хостинг-провайдеров (Дата-центры / ISP)\n")
+        lines.append(
+            "| № | Провайдер | Рабочих узлов | Всего узлов | Ср. задержка | Ср. скор | Страны |"
+        )
+        lines.append(
+            "|---|-----------|:-------------:|:-----------:|:------------:|:--------:|--------|"
+        )
+        for idx, org in enumerate(ok_orgs, 1):
+            c_str = ", ".join(org.countries) if org.countries else "-"
+            score_str = (
+                f"⭐{org.avg_score}"
+                if org.avg_score >= 90
+                else (str(org.avg_score) if org.avg_score > 0 else "—")
+            )
+            lat_str = f"{org.avg_latency_ms} мс" if org.avg_latency_ms > 0 else "-"
+            name_clean = org.org_name.replace("|", "\\|")
+            lines.append(
+                f"| {idx} | {name_clean} | {org.ok_count} | {org.total_count} | {lat_str} | {score_str} | {c_str} |"
+            )
+
     lines.append("\n## Результаты\n")
     lines.append(
         "| № | Результат | Статус | Скор | Группа | Движок | Сервер | Страна | Egress IP | мс | Имя |"

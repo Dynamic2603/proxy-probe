@@ -115,8 +115,11 @@ def get_db_snapshot(throne_dir: Path | None = None, force_refresh: bool = False)
     shutil.copy2(src, dst)
     for ext in ("-wal", "-shm"):
         s = src.with_name(src.name + ext)
+        d = dst.with_name(dst.name + ext)
         if s.exists():
-            shutil.copy2(s, dst.with_name(dst.name + ext))
+            shutil.copy2(s, d)
+        elif d.exists():
+            d.unlink()
     _snapshot_path = dst
     _snapshot_source_dir = base_dir
     return dst

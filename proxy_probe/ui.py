@@ -3,7 +3,10 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .gist import GistSyncResult
 
 from rich.console import Console
 from rich.panel import Panel
@@ -194,6 +197,7 @@ def print_summary_panel(
     elapsed_s: float,
     cached_unique_hosts: dict[str, set[str]] | None = None,
     stats: SummaryStats | None = None,
+    gist_res: GistSyncResult | None = None,
 ) -> None:
     if stats is None:
         stats = compute_summary_stats(servers)
@@ -259,6 +263,21 @@ def print_summary_panel(
         for reason, count in stats.failure_reasons:
             lines.append(f"  • {reason}: [red]{count}[/]")
 
+    # 5. Хостинг-провайдеры (дата-центры / ISP)
+    ok_orgs = [o for o in stats.org_stats if o.ok_count > 0]
+    if ok_orgs:
+        lines.append("")
+        lines.append("[bold cyan]Хостинг-провайдеры (AGY-OK):[/]")
+        for org in ok_orgs[:5]:
+            c_str = f" | {', '.join(org.countries)}" if org.countries else ""
+            ms_str = f"ср. {org.avg_latency_ms} мс" if org.avg_latency_ms > 0 else "-"
+            score_str = (
+                f", ⭐{org.avg_score}"
+                if org.avg_score >= 90
+                else (f", скор {org.avg_score}" if org.avg_score > 0 else "")
+            )
+            lines.append(f"  • {org.org_name[:32]}: [bold]{org.ok_count}[/] серверов ({ms_str}{score_str}{c_str})")
+
     cached_total = sum(cached_counts.values())
     if cached_total > 0:
         c_parts = []
@@ -278,5 +297,14 @@ def print_summary_panel(
     lines.append(
         f"[bold green]Импорт в Throne:[/] {import_path} (рабочих в кэше: {nb + nx} — sing-box: {nb}, xray: {nx})"
     )
+    if gist_res:
+        if gist_res.success:
+            lines.append(
+                f"[bold cyan]GitHub Gist:[/] {gist_res.raw_url} [bold green](обновлён)[/]"
+            )
+        else:
+            lines.append(
+                f"[bold cyan]GitHub Gist:[/] [bold yellow]Не удалось обновить[/] ({gist_res.error_message})"
+            )
 
     console.print(Panel("\n".join(lines), title="[bold]Итоги проверки proxy-probe[/bold]", border_style="cyan"))

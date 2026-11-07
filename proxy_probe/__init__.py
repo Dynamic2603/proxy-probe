@@ -8,6 +8,11 @@ from .engines import (
     wait_port,
     xray_shorthand_to_v2ray,
 )
+from .gist import (
+    GistSyncResult,
+    resolve_gist_id,
+    sync_file_to_gist,
+)
 from .models import (
     DEFAULT_TTLS,
     RESULT_BLOCK,
@@ -54,6 +59,7 @@ from .security import (
 from .stats import (
     GeoStat,
     GroupStat,
+    OrgStat,
     SummaryStats,
     compute_summary_stats,
 )
@@ -86,7 +92,9 @@ __all__ = [
     "RESULT_UNKNOWN",
     "STREAM_CIPHERS",
     "GeoStat",
+    "GistSyncResult",
     "GroupStat",
+    "OrgStat",
     "ResultCache",
     "SecurityInfo",
     "SecurityLevel",
@@ -129,11 +137,13 @@ __all__ = [
     "print_summary_panel",
     "read_groups",
     "read_profiles_for_group",
+    "resolve_gist_id",
     "run_dir",
     "run_probe",
     "select_groups_interactive",
     "set_throne_dir",
     "split_blocks",
+    "sync_file_to_gist",
     "wait_port",
     "write_import_file",
     "write_report",

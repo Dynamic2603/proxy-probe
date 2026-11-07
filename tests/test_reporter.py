@@ -271,3 +271,57 @@ def test_write_import_file_scoring_and_degraded_retention(tmp_path: Path) -> Non
     assert data[0]["server"] == "1.1.1.1"
     assert data[1]["server"] == "2.2.2.2"
     assert data[2]["server"] == "3.3.3.3"
+
+
+def test_write_report_includes_org_ranking(tmp_path: Path) -> None:
+    rep_file = tmp_path / "report_org.md"
+    s1 = Server(
+        group_id=1,
+        group_name="Group1",
+        name="Server 1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"type": "vless"},
+        source="fresh",
+        index=1,
+        result=RESULT_OK,
+        country="Германия",
+        country_code="DE",
+        ip_out="1.1.1.1",
+        latency_ms=65,
+        score=95,
+        org="Hetzner Online GmbH",
+    )
+    s2 = Server(
+        group_id=1,
+        group_name="Group1",
+        name="Server 2",
+        engine="sing-box",
+        server="2.2.2.2",
+        server_port=443,
+        import_obj={"type": "vless"},
+        source="fresh",
+        index=2,
+        result=RESULT_OK,
+        country="Нидерланды",
+        country_code="NL",
+        ip_out="2.2.2.2",
+        latency_ms=90,
+        score=75,
+        org="DigitalOcean, LLC",
+    )
+    write_report(
+        servers=[s1, s2],
+        report_path=rep_file,
+        ver_sb="1.0",
+        ver_xr="2.0",
+        warnings=[],
+        time_s=10.0,
+    )
+    content = rep_file.read_text(encoding="utf-8")
+    assert "## Рейтинг хостинг-провайдеров (Дата-центры / ISP)" in content
+    assert "Hetzner Online GmbH" in content
+    assert "DigitalOcean, LLC" in content
+    assert "| 1 | Hetzner Online GmbH | 1 | 1 | 65 мс | ⭐95 | DE |" in content
+

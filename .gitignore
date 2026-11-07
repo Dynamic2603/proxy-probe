@@ -39,6 +39,7 @@ agy-ok.txt
 # Environment configurations and secrets
 .env
 .env.*
+!.env.example
 .keys/
 *.key
 id_*

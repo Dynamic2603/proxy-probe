@@ -33,6 +33,9 @@ uv run pxp --subset 5
 # Run with 8 concurrent workers without confirmation prompt on exit
 uv run pxp --jobs 8 --no-pause
 
+# Force recheck only dead servers, keeping cached AGY-OK and AGY-BLOCK
+uv run pxp --refresh-dead
+
 # Force recheck all servers bypassing cache
 uv run pxp --refresh-cache
 

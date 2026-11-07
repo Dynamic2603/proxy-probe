@@ -625,5 +625,64 @@ def test_sync_and_save_cache_flushes_to_disk(tmp_path: Path) -> None:
     assert cache.entries[s.cache_key]["result"] == RESULT_OK
 
 
+def test_cli_refresh_dead_flag() -> None:
+    parser = build_arg_parser()
+    args_default = parser.parse_args([])
+    assert args_default.refresh_dead is False
+
+    args_custom = parser.parse_args(["--refresh-dead"])
+    assert args_custom.refresh_dead is True
+
+
+def test_collect_and_select_servers_refresh_dead() -> None:
+    from unittest.mock import MagicMock
+
+    from proxy_probe.cli import _collect_and_select_servers
+    from proxy_probe.models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK
+
+    s_ok = Server(1, "g", "s_ok", "sing-box", "1.1.1.1", 443, {"server": "1.1.1.1", "server_port": 443}, "fresh")
+    s_block = Server(1, "g", "s_block", "sing-box", "2.2.2.2", 443, {"server": "2.2.2.2", "server_port": 443}, "fresh")
+    s_dead = Server(1, "g", "s_dead", "sing-box", "3.3.3.3", 443, {"server": "3.3.3.3", "server_port": 443}, "fresh")
+
+    cache_entries = {
+        s_ok.cache_key: {"result": RESULT_OK, "country_code": "DE", "score": 70, "state": "ACTIVE"},
+        s_block.cache_key: {"result": RESULT_BLOCK, "score": 0, "state": "DEAD"},
+        s_dead.cache_key: {"result": RESULT_DEAD, "score": 0, "state": "DEAD"},
+    }
+
+    mock_cache = MagicMock()
+    mock_cache.get_valid_server.side_effect = lambda s: cache_entries.get(s.cache_key)
+
+    with patch("proxy_probe.cli.gather_sources", return_value=([s_ok, s_block, s_dead], [])):
+        # Case 1: default (без --refresh-dead) — все 3 берутся из кэша
+        args_default = build_arg_parser().parse_args(["--group", "1"])
+        res1 = _collect_and_select_servers(
+            args=args_default, groups=[{"id": 1, "name": "g"}], cache=mock_cache, ttl_map={}
+        )
+        assert res1 is not None
+        _servers1, to_probe, cached_counts, _, _ = res1
+        assert len(to_probe) == 0
+        assert cached_counts.get(RESULT_OK) == 1
+        assert cached_counts.get(RESULT_BLOCK) == 1
+        assert cached_counts.get(RESULT_DEAD) == 1
+
+        # Case 2: с --refresh-dead — DEAD сервер отправляется на перепроверку
+        s_ok.result = ""
+        s_block.result = ""
+        s_dead.result = ""
+        args_refresh = build_arg_parser().parse_args(["--group", "1", "--refresh-dead"])
+        res2 = _collect_and_select_servers(
+            args=args_refresh, groups=[{"id": 1, "name": "g"}], cache=mock_cache, ttl_map={}
+        )
+        assert res2 is not None
+        _servers2, to_probe, cached_counts, _, _ = res2
+        assert len(to_probe) == 1
+        assert to_probe[0].server == "3.3.3.3"
+        assert cached_counts.get(RESULT_OK) == 1
+        assert cached_counts.get(RESULT_BLOCK) == 1
+        assert cached_counts.get(RESULT_DEAD) is None
+
+
+
 
 

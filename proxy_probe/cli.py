@@ -136,6 +136,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-cache", action="store_true", help="не читать и не сохранять кэш результатов")
     ap.add_argument("--refresh-cache", action="store_true", help="принудительно перепроверить серверы из кэша")
     ap.add_argument(
+        "--refresh-dead",
+        action="store_true",
+        help="принудительно перепроверить серверы со статусом DEAD из кэша (сохраняя AGY-OK и AGY-BLOCK)",
+    )
+    ap.add_argument(
         "--filter-insecure",
         action="store_true",
         default=None,
@@ -422,6 +427,8 @@ def _collect_and_select_servers(
 
     for s in servers:
         rec = cache.get_valid_server(s) if (cache and not args.refresh_cache) else None
+        if rec and getattr(args, "refresh_dead", False) and rec.get("result") == "DEAD":
+            rec = None
         if rec:
             res = rec.get("result", "")
             s.result = res
@@ -936,7 +943,7 @@ def _finalize_and_report(
         cache_note = (
             f"Серверы с кешируемыми результатами (AGY-OK/AGY-BLOCK/DEAD) берутся из кэша ({ctx.cache_path}) "
             f"и не перепроверяются до истечения TTL по типу: {ttl_txt}; "
-            f"принудительная перепроверка — запуск с --refresh-cache."
+            f"принудительная перепроверка всех — с --refresh-cache, только упавших (DEAD) — с --refresh-dead."
         )
 
     stats = compute_summary_stats(servers)

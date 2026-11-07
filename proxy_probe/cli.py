@@ -39,6 +39,7 @@ from .prober import (
     batch_probe_tcp,
     check_agy_health,
     detect_best_agy_model,
+    enrich_cached_ok_geo,
     get_default_agy_bin,
     run_probe,
 )
@@ -247,6 +248,12 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     if cache:
         ttl_txt = ", ".join(f"{k}={v // 3600}ч" if v > 0 else f"{k}=∞" for k, v in ttl_map.items())
         print(f"Кэш: {cache_path} (записей: {len(cache.entries)}, TTL: {ttl_txt})")
+        try:
+            enr = enrich_cached_ok_geo(cache)
+            if enr > 0:
+                print(f"Кэш: обогащено гео-данными {enr} записей AGY-OK")
+        except Exception:
+            pass
 
     out_dir = args.out or Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)

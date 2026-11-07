@@ -135,7 +135,7 @@ def print_results_table(servers: list[Server]) -> None:
             s.country or "-",
             s.ip_out or "-",
             format_latency(s.latency_ms),
-            (s.name or "")[:30],
+            (s.formatted_tag or s.name or "")[:30],
             s.note or "-",
         )
     console.print(table)

@@ -359,6 +359,39 @@ def batch_probe_tcp(
     return results
 
 
+def parse_geo_payload(data: dict) -> tuple[str, str, str, str, str]:
+    country_code = str(data.get("country_code", "")).strip().upper()
+    flag = data.get("flag", "")
+    if isinstance(flag, dict):
+        flag = flag.get("emoji", "")
+    if not flag and country_code:
+        flag = country_code_to_emoji(country_code)
+    country = f"{flag} {data.get('country', '')}".strip()
+    ip_out = str(data.get("ip", "")).strip()
+    city = str(data.get("city", "")).strip()
+    conn = data.get("connection")
+    org = ""
+    if isinstance(conn, dict):
+        org = str(conn.get("org") or conn.get("isp") or "").strip()
+    if not org:
+        org = str(data.get("org") or "").strip()
+    return country, ip_out, country_code, city, org
+
+
+def fetch_geo_for_ip(ip: str, timeout: float = 4.0) -> tuple[str, str, str, str, str]:
+    """Запрашивает гео-данные для egress IP напрямую с ipwho.is."""
+    if not ip or ip.startswith("127.") or ip == "localhost":
+        return "", "", "", "", ""
+    url = f"http://ipwho.is/{ip}"
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            return parse_geo_payload(data)
+    except Exception:
+        return "", "", "", "", ""
+
+
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str, str, str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
@@ -367,24 +400,43 @@ def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str, str, str, str]
     try:
         with opener.open(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
-            country_code = str(data.get("country_code", "")).strip().upper()
-            flag = data.get("flag", "")
-            if isinstance(flag, dict):
-                flag = flag.get("emoji", "")
-            if not flag and country_code:
-                flag = country_code_to_emoji(country_code)
-            country = f"{flag} {data.get('country', '')}".strip()
-            ip_out = str(data.get("ip", "")).strip()
-            city = str(data.get("city", "")).strip()
-            conn = data.get("connection")
-            org = ""
-            if isinstance(conn, dict):
-                org = str(conn.get("org") or conn.get("isp") or "").strip()
-            if not org:
-                org = str(data.get("org") or "").strip()
-            return country, ip_out, country_code, city, org
+            return parse_geo_payload(data)
     except Exception:
         return "", "", "", "", ""
+
+
+def enrich_cached_ok_geo(cache: Any, max_workers: int = 10) -> int:
+    """Обогащает записи кэша AGY-OK недостающими полями (country_code, city, org) по ip_out."""
+    if not cache or not getattr(cache, "entries", None):
+        return 0
+    needed_ips: set[str] = set()
+    for rec in cache.entries.values():
+        if rec.get("result") == RESULT_OK and rec.get("ip_out") and (not rec.get("country_code") or not rec.get("org")):
+            ip = str(rec.get("ip_out")).strip()
+            if ip and not ip.startswith("127."):
+                needed_ips.add(ip)
+
+    if not needed_ips:
+        return 0
+
+    ip_results: dict[str, tuple[str, str, str, str, str]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(needed_ips))) as ex:
+        future_to_ip = {ex.submit(fetch_geo_for_ip, ip): ip for ip in needed_ips}
+        for fut in concurrent.futures.as_completed(future_to_ip):
+            ip = future_to_ip[fut]
+            try:
+                res = fut.result()
+                if res[0] or res[2]:
+                    ip_results[ip] = res
+            except Exception:
+                pass
+
+    if ip_results:
+        updated = cache.enrich_geo_from_ips(ip_results)
+        if updated > 0:
+            cache.save()
+        return updated
+    return 0
 
 
 def preflight_check(port: int, timeout: float = 4.0) -> bool:

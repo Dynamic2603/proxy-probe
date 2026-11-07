@@ -63,7 +63,7 @@ def test_write_report(tmp_path: Path) -> None:
     assert "- Время проверки:" in content
     assert "15" in content
     assert "Внимание: тестовое предупреждение" in content
-    assert "Server\\|1" in content
+    assert "| US |" in content
     assert "Line 1 Line 2 \\| Pipe" in content
     # Проверка, что AGY-OK идет в таблице раньше, чем AGY-BLOCK
     pos_ok = content.find("| 1 | AGY-OK |")

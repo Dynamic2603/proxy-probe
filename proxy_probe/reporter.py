@@ -7,9 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, RESULT_UNKNOWN, Server
-
-RESULT_TABLE_ORDER = {RESULT_OK: 0, RESULT_BLOCK: 1, RESULT_UNKNOWN: 2, RESULT_DEAD: 3}
+from .models import RESULT_OK, Server
 
 if TYPE_CHECKING:
     from .cache import ResultCache
@@ -70,11 +68,7 @@ def write_report(
     lines.append("\n## Результаты\n")
     lines.append("| № | Результат | Группа | Движок | Сервер | Страна | Egress IP | мс | Имя | Ответ / Примечание |")
     lines.append("|---|-----------|--------|--------|--------|--------|-----------|-----|-----|-------------------|")
-    sorted_servers = sorted(
-        servers,
-        key=lambda s: (RESULT_TABLE_ORDER.get(s.result, 99), s.index),
-    )
-    for s in sorted_servers:
+    for s in servers:
         name = (s.formatted_tag or s.name or "").replace("|", "\\|")[:80]
         note = (s.note or "").replace("|", "\\|").replace("\n", " ").strip()
         lines.append(
@@ -98,9 +92,21 @@ def write_import_file(
         obj["tag"] = srv.formatted_tag
         return obj
 
+    seen_keys: set[str] = set()
+    ok_servers: list[Server] = []
+
+    # 1. Серверы активного пула в UI-порядке (s.index)
+    if fallback_servers:
+        for s in fallback_servers:
+            if s.result == RESULT_OK and s.import_obj:
+                ok_servers.append(s)
+                seen_keys.add(s.config_identity)
+                seen_keys.add(s.cache_key)
+                seen_keys.add(s.host_port)
+
+    # 2. Дополнительные валидные серверы из кэша, если они не были в активном пуле
     if cache is not None:
-        sorted_entries = sorted(cache.entries.items(), key=lambda kv: kv[0])
-        for entry_key, entry in sorted_entries:
+        for entry_key, entry in cache.entries.items():
             if entry.get("result") != RESULT_OK:
                 continue
             if not cache.is_valid(entry_key):
@@ -108,9 +114,6 @@ def write_import_file(
             raw_obj = entry.get("import_obj")
             if not isinstance(raw_obj, dict):
                 continue
-            eng = str(entry.get("engine") or "")
-            if not eng:
-                eng = "xray" if raw_obj.get("protocol") else "sing-box"
 
             host = str(raw_obj.get("server") or "")
             port = int(raw_obj.get("server_port") or 0)
@@ -119,6 +122,10 @@ def write_import_file(
                 if isinstance(sett, dict):
                     host = str(sett.get("address") or "")
                     port = int(sett.get("port") or 0)
+
+            eng = str(entry.get("engine") or "")
+            if not eng:
+                eng = "xray" if raw_obj.get("protocol") else "sing-box"
 
             s = Server(
                 group_id=0,
@@ -135,22 +142,19 @@ def write_import_file(
                 city=str(entry.get("city", "")),
                 org=str(entry.get("org", "")),
             )
-            prepared = _prepare_obj(s)
-            if eng == "xray" or (not eng and raw_obj.get("protocol")):
-                xr.append(prepared)
-            else:
-                sb.append(prepared)
-    elif fallback_servers:
-        ok = sorted(
-            [s for s in fallback_servers if s.result == RESULT_OK],
-            key=lambda s: s.host_port,
-        )
-        for s in ok:
-            prepared = _prepare_obj(s)
-            if s.engine == "xray":
-                xr.append(prepared)
-            else:
-                sb.append(prepared)
+            if s.config_identity in seen_keys or s.cache_key in seen_keys or s.host_port in seen_keys:
+                continue
+            seen_keys.add(s.config_identity)
+            seen_keys.add(s.cache_key)
+            seen_keys.add(s.host_port)
+            ok_servers.append(s)
+
+    for s in ok_servers:
+        prepared = _prepare_obj(s)
+        if s.engine == "xray" or (not s.engine and s.import_obj.get("protocol")):
+            xr.append(prepared)
+        else:
+            sb.append(prepared)
 
     if path.exists() and path.stat().st_size > 0:
         try:

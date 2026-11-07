@@ -10,9 +10,9 @@ from .benchmark import (
 from .catalogue import (
     default_catalogue_path,
     fetch_catalogue,
-    get_golden_strategies,
     get_strategy_by_number,
     load_catalogue,
+    select_mechanical_diversity_sample,
 )
 from .engine import (
     WinwsRunner,
@@ -45,11 +45,11 @@ __all__ = [
     "ensure_zapret_binaries",
     "fetch_catalogue",
     "format_benchmark_table",
-    "get_golden_strategies",
     "get_strategy_by_number",
     "is_port_in_use",
     "load_catalogue",
     "load_ratings",
     "save_ratings",
     "select_dead_servers",
+    "select_mechanical_diversity_sample",
 ]

@@ -450,11 +450,15 @@ def test_setup_environment_geo_precheck_flags() -> None:
 
 def test_cli_antidpi_flags() -> None:
     parser = build_arg_parser()
-    # Defaults
+    # Defaults: Anti-DPI теперь включен по умолчанию
     args = parser.parse_args([])
-    assert args.antidpi is False
+    assert args.antidpi is True
     assert args.antidpi_strategy is None
     assert args.antidpi_port == 10850
+
+    # Флаг отключения
+    no_args = parser.parse_args(["--no-antidpi"])
+    assert no_args.antidpi is False
 
     # Custom
     custom_args = parser.parse_args(["--antidpi", "--antidpi-strategy", "7", "--antidpi-port", "10860"])
@@ -558,12 +562,11 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
     dummy_strat = StrategyProfile(
         number=1,
         family_number=1,
-        family_name="Golden",
+        family_name="fake",
         variant=1,
         name="Fake Strategy",
         chain="fake",
         args=("--fake",),
-        is_golden=True,
     )
     mock_res = {
         "result": RESULT_OK,

@@ -21,14 +21,15 @@ from .benchmark import (
     default_ratings_path,
     format_benchmark_table,
     load_ratings,
+    prepare_strategies_for_level,
     probe_proxy_tunnel,
     save_ratings,
     select_dead_servers,
 )
-from .catalogue import fetch_catalogue, get_golden_strategies, get_strategy_by_number
+from .catalogue import fetch_catalogue, get_strategy_by_number, load_catalogue
 from .elevation import TeeOutput, is_admin, run_elevated_and_wait
 from .engine import WinwsRunner, ensure_zapret_binaries
-from .models import AntidpiBenchmarkResult, StrategyRating
+from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, StrategyRating
 from .relay import DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, ZapretRelay
 
 logger = logging.getLogger("proxy_probe.antidpi")
@@ -38,11 +39,9 @@ def cmd_update(args: argparse.Namespace) -> int:
     print("Обновление каталога Anti-DPI стратегий из upstream...")
     try:
         profiles = fetch_catalogue()
-        golden = [p for p in profiles if p.is_golden]
         total = len(profiles)
-        g_len = len(golden)
-        s_len = total - g_len
-        print(f"Успешно обновлено: {total} стратегий ({g_len} Golden, {s_len} Silver).")
+        fams = len({p.technical_family for p in profiles})
+        print(f"Успешно обновлено: {total} стратегий ({fams} уникальных технических семейств).")
         return 0
     except Exception as e:
         print(f"Ошибка обновления каталога: {e}", file=sys.stderr)
@@ -157,27 +156,41 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 
 def _run_benchmark(args: argparse.Namespace) -> int:
+    level = int(getattr(args, "level", 2) or 2)
+    cfg = CALIBRATION_LEVELS.get(level, CALIBRATION_LEVELS[2])
+
+    print("=" * 65)
+    print(f"  proxy-probe: {cfg.title}")
+    print("=" * 65)
+
     cache_path = default_cache_path()
     if not cache_path.is_file():
-        print(f"Файл кэша {cache_path} не найден. Сначала выполните прогон proxy-probe.", file=sys.stderr)
+        print(f"Файл кэша {cache_path} не найден. Сначала выполните прогон proxy-probe (run.cmd).", file=sys.stderr)
         return 1
 
     cache = ResultCache(path=cache_path)
     dead_candidates = collect_dead_candidates(cache)
 
     verify_tcp = not getattr(args, "no_tcp_verify", False)
-    selected = select_dead_servers(dead_candidates, limit=args.limit, verify_tcp=verify_tcp)
+    server_limit = args.limit if getattr(args, "limit", None) is not None else cfg.server_limit
+    selected = select_dead_servers(dead_candidates, limit=server_limit, verify_tcp=verify_tcp)
     if not selected:
         print("В базе кэша не найдено серверов с сетевым таймаутом (DEAD). Тестирование не требуется.")
         return 0
 
-    print(f"Отобрано {len(selected)} уникальных серверов со статусом DEAD для бенчмарка стратегий:")
-    for s in selected:
-        print(f"  - {s.server}:{s.server_port} ({s.name})")
+    print(f"\nОтобрано {len(selected)} серверов со статусом DEAD для калибровки:")
+    for s in selected[:15]:
+        print(f"  - {s.server}:{s.server_port} ({s.name[:35]})")
+    if len(selected) > 15:
+        print(f"  ... и еще {len(selected) - 15} серверов")
 
-    golden = get_golden_strategies()
-    test_strategies = golden[: args.top]
-    print(f"\nЗапуск бенчмарка по ТОП-{len(test_strategies)} Golden-стратегиям...")
+    catalogue = load_catalogue()
+    living_ratings = load_ratings()
+    test_strategies = prepare_strategies_for_level(level, catalogue, living_ratings)
+    if getattr(args, "top", None) is not None and args.top > 0:
+        test_strategies = test_strategies[: args.top]
+
+    print(f"\nЗапуск тестирования {len(test_strategies)} стратегий десинхронизации...")
 
     # Обеспечиваем наличие бинарников zapret2
     print("Проверка наличия бинарников Zapret2 (winws.exe, WinDivert)...")
@@ -188,10 +201,9 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     ratings: list[StrategyRating] = []
     server_rescue_map: dict[str, list[tuple[int, int]]] = {}
 
-    # Запускаем локальный релей
     relay_port = args.relay_port
     workers = min(len(selected), getattr(args, "concurrency", 15))
-    probe_timeout = float(getattr(args, "timeout", 1.8))
+    probe_timeout = float(getattr(args, "timeout", None) or cfg.timeout)
     enable_profile = bool(getattr(args, "profile", False))
     profiler = cProfile.Profile() if enable_profile else None
     if profiler:
@@ -241,12 +253,16 @@ def _run_benchmark(args: argparse.Namespace) -> int:
                     r = StrategyRating(
                         strategy_number=strat.number,
                         strategy_name=strat.name,
-                        family_name=strat.family_name,
+                        family_name=strat.technical_family,
                         rescued_count=rescued,
                         total_tested=len(selected),
                         success_rate=rate,
                         avg_latency_ms=avg_lat,
                         score=score,
+                        status="TOP" if score >= 80 else ("ACTIVE" if rescued > 0 else "DEAD"),
+                        consecutive_failures=0 if rescued > 0 else 1,
+                        last_tested=_dt.datetime.now().isoformat(),
+                        last_success=_dt.datetime.now().isoformat() if rescued > 0 else "",
                     )
                     ratings.append(r)
                     pct = int(rate * 100)
@@ -264,7 +280,7 @@ def _run_benchmark(args: argparse.Namespace) -> int:
                     # Вывод причин сбоев
                     if failed_reasons:
                         reasons_str = ", ".join(
-                            f"{r}: {cnt}" for r, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1])
+                            f"{reason}: {cnt}" for reason, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1])
                         )
                         print(f"       [-] Причины сбоев: {reasons_str}")
 
@@ -287,20 +303,18 @@ def _run_benchmark(args: argparse.Namespace) -> int:
         print("\n--- Топ-15 функций по INTERNAL TIME (собственное процессорное время) ---")
         stats.sort_stats(pstats.SortKey.TIME).print_stats(15)
 
-    # Сортируем рейтинг
-    ratings.sort(key=lambda r: (-r.rescued_count, -r.score, r.avg_latency_ms if r.avg_latency_ms > 0 else 99999))
-    best_num = ratings[0].strategy_number if ratings and ratings[0].rescued_count > 0 else None
-
-    bench_res = AntidpiBenchmarkResult(
+    # Обновляем живой рейтинг
+    living = living_ratings or AntidpiBenchmarkResult(
         tested_at=_dt.datetime.now().isoformat(),
         isp="AutoDetected",
-        best_strategy_number=best_num,
-        ratings=ratings,
+        best_strategy_number=None,
+        ratings=[],
     )
-    save_ratings(bench_res)
+    living.merge_benchmark_results(ratings)
+    save_ratings(living)
 
     print("\n" + "=" * 60)
-    print(format_benchmark_table(bench_res))
+    print(format_benchmark_table(living))
     print("=" * 60)
 
     if server_rescue_map:
@@ -312,12 +326,30 @@ def _run_benchmark(args: argparse.Namespace) -> int:
                 best_s = min(res_list, key=lambda x: x[1])
                 print(f"  - {srv.server}:{srv.server_port} ({srv.name[:35]}): {res_str} -> лучшая S{best_s[0]:02d}")
 
-    if best_num:
-        print(f"\nРекомендуемая лучшая стратегия для вашего провайдера: S{best_num:02d}")
-    else:
-        print("\nНи одна из стратегий не смогла оживить выбранные серверы на данном этапе.")
+    best_num = living.best_strategy_number
+    best_entry = next((r for r in living.ratings if r.strategy_number == best_num), None) if best_num else None
 
-    print(f"Рейтинг сохранен в {default_ratings_path()}")
+    if best_entry and best_entry.score > 0:
+        print(
+            f"\n[+] Рекомендуемая лучшая стратегия для вашего провайдера: S{best_num:02d} "
+            f"({best_entry.strategy_name})"
+        )
+        print("    Живой рейтинг сохранен в data/antidpi_ratings.json.")
+        print("\n>>> Для применения спасения запустите основной сбор: run.cmd <<<")
+    else:
+        print(f"\n[-] Ни одна из проверенных стратегий не оживила узлы на данном этапе ({cfg.title}).")
+        if cfg.next_cmd_file:
+            print("\n" + "!" * 65)
+            print("  Рекомендуется запустить следующий уровень калибровки:")
+            print(f"  Дважды кликните '{cfg.next_cmd_file}' в папке проекта")
+            print("!" * 65)
+        else:
+            print("\n" + "!" * 65)
+            print("  Внимание: Все 484 стратегии каталога дали 0% успеха.")
+            print("  Вердикт: ТСПУ вашего интернет-провайдера полностью блокирует Reality/TLS,")
+            print("  либо целевые прокси-серверы недоступны со стороны дата-центров.")
+            print("!" * 65)
+
     return 0
 
 
@@ -368,7 +400,6 @@ def _run_serve(args: argparse.Namespace) -> int:
                         target_ips.add(str(h))
 
     if not target_ips and cache_path.is_file():
-        # Фоллбэк: если конкретных IP с меткой antidpi еще нет, берем все DEAD из кэша
         cache = ResultCache(path=cache_path)
         for entry in cache.entries.values():
             if entry.get("result") == "DEAD":
@@ -410,10 +441,25 @@ def main(argv: list[str] | None = None) -> int:
     p_up = sub.add_parser("update", help="Обновить каталог 484 стратегий из репозитория igareck")
     p_up.set_defaults(func=cmd_update)
 
-    p_bench = sub.add_parser("benchmark", help="Прогнать бенчмарк ТОП-стратегий на серверах со статусом DEAD")
-    p_bench.add_argument("--limit", type=int, default=15, help="Максимум тестируемых DEAD-серверов (по умолчанию 15)")
+    p_bench = sub.add_parser("benchmark", help="Калибровка Anti-DPI стратегий на серверах со статусом DEAD")
     p_bench.add_argument(
-        "--top", type=int, default=10, help="Количество проверяемых Golden-стратегий (по умолчанию 10)"
+        "--level",
+        type=int,
+        choices=[2, 3, 4],
+        default=2,
+        help="Уровень калибровки: 2 (экспресс ~1.5м), 3 (широкий по пулу ~4-5м), 4 (глубокий 484 стратегии ~20-25м)",
+    )
+    p_bench.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Максимум тестируемых DEAD-серверов (по умолчанию из уровня)",
+    )
+    p_bench.add_argument(
+        "--top",
+        type=int,
+        default=None,
+        help="Ограничить количество проверяемых стратегий (по умолчанию из уровня)",
     )
     p_bench.add_argument(
         "--relay-port",
@@ -423,7 +469,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_bench.add_argument("--profile", action="store_true", help="Включить детальное профилирование через cProfile")
     p_bench.add_argument(
-        "--timeout", type=float, default=1.8, help="Таймаут проверки прокси-туннеля (по умолчанию 1.8с)"
+        "--timeout",
+        type=float,
+        default=None,
+        help="Таймаут проверки прокси-туннеля (по умолчанию из уровня)",
     )
     p_bench.add_argument(
         "--concurrency",

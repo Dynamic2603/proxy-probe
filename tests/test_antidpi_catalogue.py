@@ -8,10 +8,10 @@ from unittest.mock import patch
 from proxy_probe.antidpi.catalogue import (
     default_catalogue_path,
     fetch_catalogue,
-    get_golden_strategies,
     get_strategy_by_number,
     load_catalogue,
     parse_catalogue_data,
+    select_mechanical_diversity_sample,
 )
 
 
@@ -22,31 +22,26 @@ def test_load_catalogue_real() -> None:
     profiles = load_catalogue(cat_path)
     assert len(profiles) == 484
 
-    # Проверка первой стратегии (Golden)
+    # Проверка первой стратегии и очистки названия семейства от префиксов Golden/Silver
     s1 = profiles[0]
     assert s1.number == 1
     assert s1.family_number == 1
-    assert "Golden" in s1.family_name
-    assert s1.is_golden is True
+    assert not s1.family_name.startswith("Golden")
+    assert not s1.family_name.startswith("Silver")
+    assert s1.technical_family == s1.family_name
     assert s1.short_tag == "zapret:S01"
     assert len(s1.args) > 0
     assert any("multisplit" in a for a in s1.args)
 
-    # Проверка разделения Golden (1..45) и Silver (46..484)
-    golden = [p for p in profiles if p.is_golden]
-    assert len(golden) == 45
 
-    silver_first = profiles[45]
-    assert silver_first.number == 46
-    assert silver_first.is_golden is False
-    assert "Silver" in silver_first.family_name
+def test_select_mechanical_diversity_sample() -> None:
+    profiles = load_catalogue()
+    diverse = select_mechanical_diversity_sample(profiles, limit=25)
+    assert 15 <= len(diverse) <= 25
 
-
-def test_get_golden_strategies() -> None:
-    golden = get_golden_strategies()
-    assert len(golden) == 45
-    numbers = [p.number for p in golden]
-    assert numbers == list(range(1, 46))
+    # Проверяем, что в выборке представлены различные технические семейства
+    families = {p.technical_family for p in diverse}
+    assert len(families) >= 10
 
 
 def test_get_strategy_by_number() -> None:
@@ -64,8 +59,8 @@ def test_get_strategy_by_number() -> None:
 def test_parse_catalogue_data_custom() -> None:
     sample = {
         "FamilyRows": [
-            {"Number": 1, "Name": "Golden / test", "Count": 1, "First": 1, "Last": 1},
-            {"Number": 2, "Name": "Silver / test", "Count": 1, "First": 2, "Last": 2},
+            {"Number": 1, "Name": "Golden / fake + multisplit", "Count": 1, "First": 1, "Last": 1},
+            {"Number": 2, "Name": "Silver / tcpseg", "Count": 1, "First": 2, "Last": 2},
         ],
         "ProfileRows": [
             {
@@ -82,7 +77,7 @@ def test_parse_catalogue_data_custom() -> None:
                 "Family": 2,
                 "Variant": 1,
                 "Name": "Strat 2",
-                "Chain": "multisplit",
+                "Chain": "tcpseg",
                 "Args": ["--payload=tls_client_hello", "--split=1"],
                 "RecipeSHA256": "def",
             },
@@ -90,16 +85,16 @@ def test_parse_catalogue_data_custom() -> None:
     }
     profiles = parse_catalogue_data(sample)
     assert len(profiles) == 2
-    assert profiles[0].is_golden is True
+    assert profiles[0].technical_family == "fake + multisplit"
     assert profiles[0].short_tag == "zapret:S01"
-    assert profiles[1].is_golden is False
+    assert profiles[1].technical_family == "tcpseg"
     assert profiles[1].short_tag == "zapret:S02"
 
 
 def test_fetch_catalogue_fallback_on_network_error(tmp_path: Path) -> None:
     local_file = tmp_path / "antidpi_catalogue.json"
     dummy_data = {
-        "FamilyRows": [{"Number": 1, "Name": "Golden / Dummy"}],
+        "FamilyRows": [{"Number": 1, "Name": "fake + multisplit"}],
         "ProfileRows": [
             {
                 "Number": i,
@@ -113,7 +108,6 @@ def test_fetch_catalogue_fallback_on_network_error(tmp_path: Path) -> None:
     }
     local_file.write_text(json.dumps(dummy_data), encoding="utf-8")
 
-    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Network unreachable")):
-        res = fetch_catalogue(path=local_file)
-        assert len(res) == 59
-        assert res[0].name == "Dummy 1"
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("No internet")):
+        loaded = fetch_catalogue(path=local_file)
+        assert len(loaded) == 59

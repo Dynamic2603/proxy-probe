@@ -35,7 +35,12 @@ def parse_catalogue_data(data: dict) -> list[StrategyProfile]:
         fam_id = int(row.get("Family", 0))
         fam_info = families_by_id.get(fam_id, {})
         fam_name = str(fam_info.get("Name", f"Family {fam_id}"))
-        is_golden = fam_name.strip().lower().startswith("golden") if fam_info else (1 <= fam_id <= 5)
+
+        # Очищаем название семейства от сторонних маркетинговых префиксов ("Golden /", "Silver /")
+        clean_fam = fam_name
+        for prefix in ("Golden / ", "Silver / ", "Golden /", "Silver /"):
+            if clean_fam.startswith(prefix):
+                clean_fam = clean_fam[len(prefix) :].strip()
 
         raw_args = row.get("Args", [])
         args = tuple(str(a) for a in raw_args) if isinstance(raw_args, list) else ()
@@ -43,12 +48,11 @@ def parse_catalogue_data(data: dict) -> list[StrategyProfile]:
         p = StrategyProfile(
             number=num,
             family_number=fam_id,
-            family_name=fam_name,
+            family_name=clean_fam,
             variant=int(row.get("Variant", 1)),
             name=str(row.get("Name", f"Strategy {num}")),
             chain=str(row.get("Chain", "")),
             args=args,
-            is_golden=is_golden,
             recipe_sha256=str(row.get("RecipeSHA256", "")),
             init_script=row.get("Init"),
         )
@@ -98,9 +102,43 @@ def fetch_catalogue(
         raise
 
 
-def get_golden_strategies(path: Path | None = None) -> list[StrategyProfile]:
-    """Возвращает список Golden-стратегий (топ-45 наиболее эффективных для обхода ТСПУ)."""
-    return [p for p in load_catalogue(path) if p.is_golden]
+def select_mechanical_diversity_sample(
+    catalogue: list[StrategyProfile],
+    limit: int = 25,
+) -> list[StrategyProfile]:
+    """Формирует ортогональный срез стратегий по разнообразию технических механик десинхронизации (SSOT).
+
+    Вместо субъективной выборки автора группирует 484 стратегии по техническим семействам
+    и отбирает ключевых представителей с различными комбинациями фейков (spotify, google, без фейка)
+    и TCP-сдвигов (seq, ts, disorder, multisplit).
+    """
+    by_family: dict[str, list[StrategyProfile]] = {}
+    for p in catalogue:
+        by_family.setdefault(p.technical_family, []).append(p)
+
+    selected: list[StrategyProfile] = []
+    seen_numbers: set[int] = set()
+
+    # 1. Первый проход: берем по 1 представителю от каждого уникального семейства
+    for items in by_family.values():
+        first = items[0]
+        if first.number not in seen_numbers:
+            selected.append(first)
+            seen_numbers.add(first.number)
+
+    # 2. Второй проход: для семейств с вариациями фейков/сдвигов добираем второй непохожий вариант
+    for items in by_family.values():
+        if len(selected) >= limit:
+            break
+        if len(items) > 1:
+            for candidate in items[1:]:
+                # Ищем кандидата с отличающимся фейком или сдвигом
+                if candidate.name != items[0].name and candidate.number not in seen_numbers:
+                    selected.append(candidate)
+                    seen_numbers.add(candidate.number)
+                    break
+
+    return selected[:limit]
 
 
 def get_strategy_by_number(number: int, path: Path | None = None) -> StrategyProfile | None:

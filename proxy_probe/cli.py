@@ -211,8 +211,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--antidpi",
-        action="store_true",
-        help="оживлять заблокированные серверы (DEAD) через изолированный Zapret2 SOCKS5-релей",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "оживлять заблокированные серверы (DEAD) через изолированный Zapret2 SOCKS5-релей "
+            "(по умолчанию включено, отключение: --no-antidpi)"
+        ),
     )
     ap.add_argument(
         "--antidpi-strategy",
@@ -267,7 +271,7 @@ class RuntimeContext:
     table_mode: str = "ok"
     table_limit: int = 20
     gist_id: str | None = None
-    antidpi: bool = False
+    antidpi: bool = True
     antidpi_strategy: int | None = None
     antidpi_port: int = 10850
 
@@ -357,7 +361,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         table_mode=str(getattr(args, "table", "ok")),
         table_limit=int(getattr(args, "table_limit", 20)),
         gist_id=gist_id,
-        antidpi=bool(getattr(args, "antidpi", False)),
+        antidpi=bool(getattr(args, "antidpi", True)),
         antidpi_strategy=getattr(args, "antidpi_strategy", None),
         antidpi_port=int(getattr(args, "antidpi_port", 10850)),
     )
@@ -681,8 +685,8 @@ def _execute_antidpi_stage(
     if not ctx.antidpi:
         return 0
 
-    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings
-    from .antidpi.catalogue import get_golden_strategies, get_strategy_by_number
+    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings, save_ratings
+    from .antidpi.catalogue import get_strategy_by_number
     from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
     from .antidpi.relay import ZapretRelay
     from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
@@ -699,13 +703,13 @@ def _execute_antidpi_stage(
     ports_str = ",".join(sorted({str(s.server_port) for s in dead_candidates if s.server_port})) or "443"
 
     strat_num = ctx.antidpi_strategy
+    ratings = load_ratings()
     if strat_num is None:
-        ratings = load_ratings()
-        if ratings and ratings.best_strategy_number:
-            strat_num = ratings.best_strategy_number
-        else:
-            golden = get_golden_strategies()
-            strat_num = golden[0].number if golden else 1
+        strat_num = (
+            ratings.best_strategy_number
+            if (ratings and ratings.best_strategy_number)
+            else 10  # Дефолтная доказанная стратегия обхода
+        )
 
     strat = get_strategy_by_number(strat_num)
     if not strat:
@@ -809,6 +813,11 @@ def _execute_antidpi_stage(
     finally:
         pbar.close()
 
+    # Обновляем живой рейтинг на основе реального результата прогона
+    if ratings is not None:
+        ratings.record_live_feedback(strat.number, rescued_count, len(dead_candidates))
+        save_ratings(ratings)
+
     if rescued_count > 0:
         total_dead = len(dead_candidates)
         console.print(
@@ -816,7 +825,12 @@ def _execute_antidpi_stage(
         )
     else:
         console.print(
-            f"[dim]Anti-DPI: стратегия S{strat.number:02d} не смогла оживить проверенные DEAD серверы.[/dim]"
+            f"\n[yellow]⚠ Anti-DPI: текущая стратегия S{strat.number:02d} "
+            "не смогла оживить упавшие узлы (0 спасено).[/yellow]"
+        )
+        console.print(
+            "[bold cyan]Рекомендуется выполнить экспресс-калибровку (Уровень 2):[/bold cyan]\n"
+            "[bold white]  Дважды кликните 'calibrate_level2.cmd' в папке проекта[/bold white]\n"
         )
 
     return rescued_count

@@ -74,3 +74,16 @@ def test_cmd_serve_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch) -> N
     _args, kwargs = mock_run.call_args
     params = kwargs.get("params") or _args[1]
     assert "-m proxy_probe.antidpi serve --port 10850" in params
+
+
+def test_cmd_benchmark_with_levels(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("proxy_probe.antidpi.__main__.is_admin", lambda: False)
+    mock_run = MagicMock(return_value=0)
+    monkeypatch.setattr("proxy_probe.antidpi.__main__.run_elevated_and_wait", mock_run)
+
+    for lvl in (2, 3, 4):
+        rc = main(["benchmark", "--level", str(lvl)])
+        assert rc == 0
+        _args, kwargs = mock_run.call_args
+        params = kwargs.get("params") or _args[1]
+        assert f"-m proxy_probe.antidpi benchmark --level {lvl}" in params

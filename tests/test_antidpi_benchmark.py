@@ -9,11 +9,16 @@ from proxy_probe.antidpi.benchmark import (
     calculate_strategy_score,
     format_benchmark_table,
     load_ratings,
+    prepare_strategies_for_level,
     probe_proxy_tunnel,
     save_ratings,
     select_dead_servers,
 )
-from proxy_probe.antidpi.models import AntidpiBenchmarkResult, StrategyRating
+from proxy_probe.antidpi.models import (
+    AntidpiBenchmarkResult,
+    StrategyProfile,
+    StrategyRating,
+)
 from proxy_probe.models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, Server
 
 
@@ -52,7 +57,11 @@ def test_calculate_strategy_score() -> None:
 
     # 5 из 10 спасено, задержка 150мс
     score_mid = calculate_strategy_score(5, 10, 150)
-    assert 50 <= score_mid <= 60
+    assert 50 <= score_mid <= 65
+
+    # Штраф за повторные сбои
+    score_penalized = calculate_strategy_score(10, 10, 80, failures=2)
+    assert score_penalized == 50  # 100 - 2 * 25
 
 
 def test_build_relay_detour() -> None:
@@ -99,7 +108,7 @@ def test_save_and_load_ratings(tmp_path: Path) -> None:
     r1 = StrategyRating(
         strategy_number=1,
         strategy_name="Fake + Split",
-        family_name="Golden 1",
+        family_name="fake + multisplit",
         rescued_count=8,
         total_tested=10,
         success_rate=0.8,
@@ -122,18 +131,20 @@ def test_save_and_load_ratings(tmp_path: Path) -> None:
     assert loaded.best_strategy_number == 1
     assert len(loaded.ratings) == 1
     assert loaded.ratings[0].strategy_number == 1
+    assert loaded.ratings[0].technical_family == "fake + multisplit"
 
 
 def test_format_benchmark_table() -> None:
     r1 = StrategyRating(
         strategy_number=1,
         strategy_name="Fake + Split",
-        family_name="Golden 1",
+        family_name="fake + multisplit",
         rescued_count=8,
         total_tested=10,
         success_rate=0.8,
         avg_latency_ms=75,
         score=84,
+        status="TOP",
     )
     bench = AntidpiBenchmarkResult(
         tested_at="2026-11-07T07:00:00",
@@ -146,7 +157,80 @@ def test_format_benchmark_table() -> None:
     assert "8/10" in table
     assert "80%" in table
     assert "75 мс" in table
-    assert "Golden 1" in table
+    assert "fake + multisplit" in table
+    assert "[⭐TOP]" in table
+
+
+def test_living_ratings_feedback_and_merge() -> None:
+    bench = AntidpiBenchmarkResult(
+        tested_at="2026-11-07T07:00:00",
+        isp="AutoDetected",
+        best_strategy_number=10,
+        ratings=[
+            StrategyRating(
+                strategy_number=10,
+                strategy_name="Spotify",
+                family_name="fake + multisplit",
+                rescued_count=2,
+                total_tested=10,
+                success_rate=0.2,
+                avg_latency_ms=120,
+                score=40,
+                status="ACTIVE",
+            )
+        ],
+    )
+
+    # 1. Живой сбой (0 спасено) -> штраф и перевод в DEGRADED
+    bench.record_live_feedback(strategy_number=10, rescued=0, total=10)
+    assert bench.ratings[0].consecutive_failures == 1
+    assert bench.ratings[0].score == 15  # 40 - 25
+    assert bench.ratings[0].status == "DEGRADED"
+
+    # 2. Еще один сбой -> score падает до 0, статус DEAD
+    bench.record_live_feedback(strategy_number=10, rescued=0, total=10)
+    assert bench.ratings[0].consecutive_failures == 2
+    assert bench.ratings[0].score == 0
+    assert bench.ratings[0].status == "DEAD"
+    assert bench.best_strategy_number is None
+
+    # 3. Успешный бенчмарк оживляет стратегию
+    new_r = StrategyRating(
+        strategy_number=10,
+        strategy_name="Spotify",
+        family_name="fake + multisplit",
+        rescued_count=5,
+        total_tested=10,
+        success_rate=0.5,
+        avg_latency_ms=110,
+        score=65,
+    )
+    bench.merge_benchmark_results([new_r])
+    assert bench.ratings[0].consecutive_failures == 0
+    assert bench.ratings[0].score == 65
+    assert bench.ratings[0].status == "ACTIVE"
+    assert bench.best_strategy_number == 10
+
+
+def test_prepare_strategies_for_level() -> None:
+    strat1 = StrategyProfile(1, 1, "fake + multisplit", 1, "S1", "", ())
+    strat2 = StrategyProfile(2, 2, "tcpseg", 1, "S2", "", ())
+    catalogue = [strat1, strat2]
+
+    living = AntidpiBenchmarkResult(
+        tested_at="",
+        isp="",
+        best_strategy_number=2,
+        ratings=[
+            StrategyRating(2, "S2", "tcpseg", 1, 1, 1.0, 50, 90, status="TOP"),
+        ],
+    )
+
+    # Уровень 2: приоритет проверенным лидерам (S2 идет раньше S1)
+    l2 = prepare_strategies_for_level(2, catalogue, living)
+    assert len(l2) == 2
+    assert l2[0].number == 2
+    assert l2[1].number == 1
 
 
 def test_select_dead_servers_ranking() -> None:

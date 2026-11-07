@@ -25,7 +25,8 @@ from ..engines import (
 )
 from ..models import RESULT_BLOCK, RESULT_OK, Server
 from ..prober import PREFLIGHT_URL
-from .models import AntidpiBenchmarkResult
+from .catalogue import select_mechanical_diversity_sample
+from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, StrategyProfile
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +40,23 @@ def default_ratings_path() -> Path:
 
 
 def load_ratings(path: Path | None = None) -> AntidpiBenchmarkResult | None:
-    """Загружает сохраненный локальный рейтинг стратегий."""
+    """Загружает сохраненный локальный живой рейтинг стратегий."""
     p = path or default_ratings_path()
     if not p.is_file():
         return None
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        return AntidpiBenchmarkResult.from_dict(raw)
+        res = AntidpiBenchmarkResult.from_dict(raw)
+        res.sort_ratings()
+        return res
     except Exception as exc:
         logger.warning("Сбой чтения рейтинга стратегий %s: %s", p, exc)
         return None
 
 
 def save_ratings(result: AntidpiBenchmarkResult, path: Path | None = None) -> None:
-    """Атомарно сохраняет результаты бенчмарка в JSON-файл (SSOT)."""
+    """Атомарно сохраняет живой рейтинг в JSON-файл (SSOT)."""
+    result.sort_ratings()
     p = path or default_ratings_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
@@ -94,7 +98,6 @@ def select_dead_servers(
     def _rank(srv: Server) -> tuple[int, int]:
         note = (srv.note or "").lower()
         if "tcp:" in note or "хост не отвечает" in note or "dns" in note:
-            # Узлы с подтвержденным падением на L4 имеют минимальный приоритет
             pri = 9
         elif "preflight" in note or "туннель" in note or "reset" in note or "handshake" in note:
             pri = 0
@@ -107,7 +110,7 @@ def select_dead_servers(
     candidates.sort(key=_rank)
 
     if not verify_tcp or not candidates:
-        return candidates[:limit]
+        return candidates[:limit] if limit > 0 else candidates
 
     def _is_tcp_alive(srv: Server) -> bool:
         try:
@@ -116,9 +119,10 @@ def select_dead_servers(
         except Exception:
             return False
 
-    chunk_size = max(limit * 2, 30)
+    effective_limit = limit if limit > 0 else len(candidates)
+    chunk_size = max(effective_limit * 2, 30)
     verified: list[Server] = []
-    for idx in range(0, min(len(candidates), 300), chunk_size):
+    for idx in range(0, len(candidates), chunk_size):
         chunk = candidates[idx : idx + chunk_size]
         workers = min(len(chunk), tcp_concurrency)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -126,23 +130,85 @@ def select_dead_servers(
         for srv, alive in zip(chunk, results, strict=True):
             if alive:
                 verified.append(srv)
-                if len(verified) >= limit:
+                if len(verified) >= effective_limit:
                     break
-        if len(verified) >= limit:
+        if len(verified) >= effective_limit:
             break
 
     return verified
 
 
-def calculate_strategy_score(rescued: int, total: int, avg_latency: int) -> int:
+def calculate_strategy_score(rescued: int, total: int, avg_latency: int, failures: int = 0) -> int:
     """Вычисляет скор надежности стратегии (0..100) на выборке упавших узлов (SSOT)."""
     if total <= 0 or rescued <= 0:
         return 0
     rate = rescued / total
-    base = int(rate * 80)
+    base = int(rate * 70)  # до 70 баллов за долю успеха
     lat_penalty = max(0, (avg_latency - 100) // 10) if avg_latency > 0 else 0
-    lat_bonus = max(0, 20 - lat_penalty)
-    return max(1, min(100, base + lat_bonus))
+    lat_bonus = max(0, 30 - lat_penalty)  # до 30 баллов за скорость
+    penalty = failures * 25  # штраф за повторные провалы
+    return max(1, min(100, base + lat_bonus - penalty))
+
+
+def prepare_strategies_for_level(
+    level: int,
+    catalogue: list[StrategyProfile],
+    living_ratings: AntidpiBenchmarkResult | None,
+) -> list[StrategyProfile]:
+    """Формирует адаптивную очередь стратегий для конкретного калибровочного уровня (SSOT).
+
+    - Уровень 2: Экспресс-калибровка разнообразия механик (~20-25 стратегий).
+    - Уровень 3: ТОП-стратегии живого рейтинга.
+    - Уровень 4: Полный перебор всех 484 стратегий каталога.
+    """
+    cfg = CALIBRATION_LEVELS.get(level, CALIBRATION_LEVELS[2])
+    cat_by_num = {p.number: p for p in catalogue}
+    living = living_ratings.ratings if living_ratings else []
+
+    if cfg.strategy_mode == "diversity":
+        # Сначала проверенные лидеры живого рейтинга (Fast-Path), затем срез разнообразия механик
+        selected: list[StrategyProfile] = []
+        seen: set[int] = set()
+
+        for r in living:
+            if r.score > 0 and r.strategy_number in cat_by_num:
+                selected.append(cat_by_num[r.strategy_number])
+                seen.add(r.strategy_number)
+
+        for p in select_mechanical_diversity_sample(catalogue, limit=25):
+            if p.number not in seen:
+                selected.append(p)
+                seen.add(p.number)
+
+        return selected
+
+    if cfg.strategy_mode == "top_living":
+        # ТОП живого рейтинга
+        selected = []
+        seen = set()
+        for r in living:
+            if r.strategy_number in cat_by_num:
+                selected.append(cat_by_num[r.strategy_number])
+                seen.add(r.strategy_number)
+            if len(selected) >= 15:
+                break
+        # Если живой рейтинг пуст, фоллбэк на срез разнообразия
+        if not selected:
+            selected = select_mechanical_diversity_sample(catalogue, limit=20)
+        return selected
+
+    # strategy_mode == "all": все 484 стратегии, причем проверенные ранее лидеры идут первыми
+    selected = []
+    seen = set()
+    for r in living:
+        if r.score > 0 and r.strategy_number in cat_by_num:
+            selected.append(cat_by_num[r.strategy_number])
+            seen.add(r.strategy_number)
+    for p in catalogue:
+        if p.number not in seen:
+            selected.append(p)
+            seen.add(p.number)
+    return selected
 
 
 def apply_relay_detour(
@@ -312,12 +378,12 @@ def probe_proxy_tunnel(
 
 
 def format_benchmark_table(result: AntidpiBenchmarkResult) -> str:
-    """Форматирует сводную таблицу результатов бенчмарка в читаемый Markdown/консольный вид."""
+    """Форматирует сводную таблицу живого рейтинга в читаемый консольный вид (SSOT)."""
     lines: list[str] = [
-        f"### Рейтинг Anti-DPI стратегий (Дата: {result.tested_at[:19]}, Провайдер: {result.isp or 'Default'})",
+        f"### Живой рейтинг Anti-DPI стратегий (Дата: {result.tested_at[:19]}, Провайдер: {result.isp or 'Default'})",
         "",
-        "| № | Стратегия | Семейство | Спасено | Успех | Задержка | Скор |",
-        "|---|---|---|---|---|---|---|",
+        "| № | Стратегия | Механика | Статус | Спасено | Успех | Задержка | Скор |",
+        "|---|---|---|---|---|---|---|---|",
     ]
 
     for r in result.ratings:
@@ -325,9 +391,10 @@ def format_benchmark_table(result: AntidpiBenchmarkResult) -> str:
         mark = "⭐ " if is_best else ""
         pct = f"{int(r.success_rate * 100)}%"
         lat = f"{r.avg_latency_ms} мс" if r.avg_latency_ms > 0 else "—"
-        name = r.strategy_name[:40] + ("..." if len(r.strategy_name) > 40 else "")
+        name = r.strategy_name[:36] + ("..." if len(r.strategy_name) > 36 else "")
+        status_b = r.status_badge
         lines.append(
-            f"| {mark}S{r.strategy_number:02d} | {name} | {r.family_name} | "
+            f"| {mark}S{r.strategy_number:02d} | {name} | {r.technical_family} | {status_b} | "
             f"{r.rescued_count}/{r.total_tested} | {pct} | {lat} | {r.score} |"
         )
 

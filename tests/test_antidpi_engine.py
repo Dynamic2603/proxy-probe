@@ -17,7 +17,7 @@ def make_test_strategy(num: int = 1) -> StrategyProfile:
     return StrategyProfile(
         number=num,
         family_number=1,
-        family_name="Golden / fake + multisplit",
+        family_name="fake + multisplit",
         variant=1,
         name="Test Strategy",
         chain="fake + multisplit",
@@ -26,7 +26,6 @@ def make_test_strategy(num: int = 1) -> StrategyProfile:
             "--lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000",
             "--lua-desync=multisplit:pos=1,midsld",
         ),
-        is_golden=True,
     )
 
 

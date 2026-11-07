@@ -171,13 +171,21 @@ class WinwsRunner:
         cmd = self.build_command_line()
         logger.debug("Запуск Zapret2 winws: %s", " ".join(cmd))
 
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=str(self.zapret_dir),
-        )
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(self.zapret_dir),
+            )
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 740:
+                raise PermissionError(
+                    "Для работы Zapret2 (драйвер WinDivert) требуются права Администратора. "
+                    "Пожалуйста, запустите терминал от имени Администратора (Run as Administrator)."
+                ) from exc
+            raise
         _ACTIVE_RUNNERS.add(self)
 
         # Даем процессу 150мс проверить инициализацию драйвера WinDivert

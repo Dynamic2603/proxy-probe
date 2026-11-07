@@ -4,10 +4,66 @@ import datetime as _dt
 import json
 from pathlib import Path
 
-from .models import DEFAULT_TTLS, RESULT_OK, RESULT_PRIORITIES, Server
+from .models import (
+    DEFAULT_TTLS,
+    MAX_CONSECUTIVE_FAILS,
+    RESULT_OK,
+    RESULT_PRIORITIES,
+    STATE_ACTIVE,
+    STATE_DEAD,
+    STATE_DEGRADED,
+    Server,
+)
 
 CACHE_VERSION = 1
 DEFAULT_CACHE_NAME = "results.json"
+
+
+def calculate_score(
+    ok_count: int,
+    consecutive_fails: int,
+    latency_ms: int,
+) -> int:
+    """Вычисляет рейтинг надежности сервера (0..100)."""
+    if ok_count <= 0 or consecutive_fails >= MAX_CONSECUTIVE_FAILS:
+        return 0
+    base = 70
+    bonus_history = min(20, max(0, ok_count - 1) * 3)
+    penalty_latency = min(15, max(0, (latency_ms - 150) // 20)) if latency_ms > 0 else 0
+    penalty_fails = consecutive_fails * 30
+    score = base + bonus_history - penalty_latency - penalty_fails
+    return max(1, min(100, score))
+
+
+def resolve_lifecycle(
+    ok_count: int,
+    consecutive_fails: int,
+    probe_result: str,
+) -> tuple[str, int, int]:
+    """Определяет (new_state, new_consecutive_fails, new_ok_count)."""
+    if probe_result == RESULT_OK:
+        return STATE_ACTIVE, 0, ok_count + 1
+
+    # Сбой (DEAD, AGY-BLOCK или ошибка)
+    new_fails = consecutive_fails + 1
+    if ok_count >= 1 and new_fails < MAX_CONSECUTIVE_FAILS:
+        return STATE_DEGRADED, new_fails, ok_count
+
+    return STATE_DEAD, new_fails, ok_count
+
+
+def _normalize_entry(rec: dict) -> dict:
+    """Обеспечивает обратную совместимость для старых записей кэша results.json."""
+    res = rec.get("result", "")
+    is_ok = res == RESULT_OK
+    rec.setdefault("state", STATE_ACTIVE if is_ok else STATE_DEAD)
+    rec.setdefault("score", 70 if is_ok else 0)
+    rec.setdefault("consecutive_fails", 0)
+    rec.setdefault("ok_count", 1 if is_ok else 0)
+    rec.setdefault("check_count", 1)
+    rec.setdefault("first_seen", rec.get("checked", ""))
+    rec.setdefault("last_ok", rec.get("checked", "") if is_ok else "")
+    return rec
 
 
 def default_cache_path() -> Path:
@@ -35,7 +91,11 @@ class ResultCache:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             servers = data.get("servers") if isinstance(data, dict) else None
             if isinstance(servers, dict):
-                self.entries = {k: v for k, v in servers.items() if isinstance(k, str) and isinstance(v, dict)}
+                self.entries = {
+                    k: _normalize_entry(v)
+                    for k, v in servers.items()
+                    if isinstance(k, str) and isinstance(v, dict)
+                }
             else:
                 self.entries = {}
         except Exception:
@@ -83,8 +143,33 @@ class ResultCache:
     def update_from_server(self, server: Server, now: _dt.datetime | None = None) -> None:
         if server.result not in self.ttl_map:
             return
-        now_s = (now or utcnow()).isoformat(timespec="seconds")
-        cur = self.entries.get(server.cache_key) or self.entries.get(server.host_port) or {}
+        now_dt = now or utcnow()
+        now_s = now_dt.isoformat(timespec="seconds")
+        cur_raw = self.entries.get(server.cache_key) or self.entries.get(server.host_port) or {}
+        cur = _normalize_entry(dict(cur_raw)) if cur_raw else {}
+
+        cur_ok_count = int(cur.get("ok_count", 1 if cur.get("result") == RESULT_OK else 0))
+        cur_check_count = int(cur.get("check_count", 0)) + 1
+        cur_fails = int(cur.get("consecutive_fails", 0))
+
+        new_state, new_fails, new_ok_count = resolve_lifecycle(
+            ok_count=cur_ok_count,
+            consecutive_fails=cur_fails,
+            probe_result=server.result,
+        )
+        new_score = calculate_score(
+            ok_count=new_ok_count,
+            consecutive_fails=new_fails,
+            latency_ms=server.latency_ms,
+        )
+
+        first_seen = cur.get("first_seen") or now_s
+        last_ok = now_s if server.result == RESULT_OK else (cur.get("last_ok") or "")
+
+        server.state = new_state
+        server.score = new_score
+        server.consecutive_fails = new_fails
+
         rec: dict = {
             "checked": now_s,
             "result": server.result,
@@ -95,11 +180,18 @@ class ResultCache:
             "org": server.org or cur.get("org", ""),
             "latency_ms": server.latency_ms,
             "note": server.note,
+            "state": new_state,
+            "score": new_score,
+            "consecutive_fails": new_fails,
+            "ok_count": new_ok_count,
+            "check_count": cur_check_count,
+            "first_seen": first_seen,
+            "last_ok": last_ok,
         }
-        if server.result == RESULT_OK:
-            rec["engine"] = server.engine
+        if server.result == RESULT_OK or new_state == STATE_DEGRADED:
+            rec["engine"] = server.engine or cur.get("engine", "")
             rec["import_obj"] = server.import_obj or cur.get("import_obj")
-        self.put(server.cache_key, rec, force=True)
+        self.put(server.cache_key, rec, force=True, now=now_dt)
 
     def enrich_from_server(self, server: Server) -> bool:
         rec = self.entries.get(server.cache_key) or self.entries.get(server.host_port)

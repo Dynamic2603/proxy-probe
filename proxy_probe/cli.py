@@ -32,7 +32,7 @@ from .orchestrator import (
     pause_on_exit,
     run_dir,
 )
-from .parsers import parse_subscription
+from .parsers import extract_host_port, extract_tag, parse_subscription
 from .prober import (
     AGY_PRINT_TIMEOUT_DEFAULT,
     ProcessRegistry,
@@ -131,6 +131,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--no-cache", action="store_true", help="не читать и не сохранять кэш результатов")
     ap.add_argument("--refresh-cache", action="store_true", help="принудительно перепроверить серверы из кэша")
+    ap.add_argument(
+        "--filter-insecure",
+        action="store_true",
+        default=None,
+        help="принудительно фильтровать небезопасные серверы (allowInsecure TLS, слабые шифры, открытый трафик)",
+    )
+    ap.add_argument(
+        "--allow-insecure",
+        action="store_true",
+        default=False,
+        help="разрешить небезопасные серверы (отключить фильтрацию, даже если она включена в Throne)",
+    )
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -241,29 +253,68 @@ def _collect_and_select_servers(
     if not selected:
         counts: dict[int, int] = {}
         for g in groups:
+            gid = g["id"]
+            tag_name = g["name"]
+            try:
+                db_items = read_profiles_for_group(gid, tag_name)
+            except Exception:
+                db_items = []
+
             url = g.get("url")
+            online_items: list[Server] = []
             if url and not args.no_fetch:
                 data = fetch_subscription(url, timeout=15.0)
                 if data is not None:
                     prefetched_subs[url] = data
-                    n = len(parse_subscription(data))
+                    for eng, obj in parse_subscription(data):
+                        srv, prt = extract_host_port(obj)
+                        if srv:
+                            online_items.append(
+                                Server(
+                                    group_id=gid,
+                                    group_name=tag_name,
+                                    name=extract_tag(obj) or f"{srv}:{prt}",
+                                    engine=eng,
+                                    server=srv,
+                                    server_port=prt,
+                                    import_obj=obj,
+                                    source="fresh",
+                                )
+                            )
+                    total_count = len(dedupe_servers(db_items + online_items))
+                    counts[gid] = total_count
+                    if db_items and online_items:
+                        print(
+                            f"  подписка «{tag_name}» — {total_count} серверов "
+                            f"(онлайн: {len(online_items)}, БД: {len(db_items)})"
+                        )
+                    elif online_items:
+                        print(f"  подписка «{tag_name}» — {total_count} серверов (свежая онлайн)")
+                    else:
+                        print(f"  подписка «{tag_name}» — {total_count} серверов (из БД)")
                 else:
-                    n = len(read_profiles_for_group(g["id"]))
-                counts[g["id"]] = n
-                tag_name = g["name"]
-                if data is not None and n:
-                    print(f"  подписка «{tag_name}» — {n} серверов (свежая)")
-                else:
-                    print(f"  подписка «{tag_name}» — недоступна/не распознана, будет из БД")
+                    counts[gid] = len(db_items)
+                    print(f"  подписка «{tag_name}» — {len(db_items)} серверов (онлайн недоступен, взято из БД)")
             else:
-                n = len(read_profiles_for_group(g["id"]))
-                counts[g["id"]] = n
+                counts[gid] = len(db_items)
         selected = interactive_select(groups, counts)
 
     if not selected:
         return None
 
-    servers, warnings = gather_sources(groups, selected, args.no_fetch, prefetched=prefetched_subs)
+    filter_insecure_val: bool | None = None
+    if args.allow_insecure:
+        filter_insecure_val = False
+    elif args.filter_insecure:
+        filter_insecure_val = True
+
+    servers, warnings = gather_sources(
+        groups, selected, args.no_fetch, prefetched=prefetched_subs, filter_insecure=filter_insecure_val
+    )
+    for w in warnings:
+        if "Отфильтровано" in w:
+            console.print(f"[yellow]{w}[/yellow]")
+
     servers = dedupe_servers(servers)
     if args.subset > 0:
         servers = servers[: args.subset]

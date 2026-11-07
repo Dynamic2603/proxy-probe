@@ -11,12 +11,14 @@ from typing import Any
 
 from .models import Server
 from .parsers import USER_AGENT, extract_host_port, extract_tag, parse_subscription
+from .security import is_insecure_server
 from .throne import read_profiles_for_group
 from .ui import select_groups_interactive
 
 __all__ = [
     "dedupe_servers",
     "fetch_subscription",
+    "filter_insecure_servers",
     "gather_sources",
     "interactive_select",
     "pause_on_exit",
@@ -75,35 +77,58 @@ def dedupe_servers(items: list[Server]) -> list[Server]:
     return list(seen.values())
 
 
+def filter_insecure_servers(servers: list[Server]) -> tuple[list[Server], list[Server]]:
+    """Разделяет список серверов на безопасные и небезопасные."""
+    safe: list[Server] = []
+    insecure: list[Server] = []
+    for s in servers:
+        if is_insecure_server(s):
+            insecure.append(s)
+        else:
+            safe.append(s)
+    return safe, insecure
+
+
 def gather_sources(
     groups: list[dict],
     selected: set[int],
     no_fetch: bool,
     prefetched: dict[str, bytes] | None = None,
+    filter_insecure: bool | None = None,
 ) -> tuple[list[Server], list[str]]:
     warnings: list[str] = []
     all_items: list[Server] = []
-    group_names = {g["id"]: g["name"] for g in groups}
-    for g in groups:
-        gid = g["id"]
-        if gid not in selected:
+    group_map = {g["id"]: g for g in groups}
+    for gid in sorted(selected):
+        g = group_map.get(gid)
+        if not g:
             continue
-        gname = group_names[gid]
-        items: list[Server] = []
-        src = "fresh"
+        gname = g.get("name", f"Group {gid}")
+        remove_insecure = bool(g.get("remove_insecure", False))
+
+        # 1. Загрузка из локальной БД Throne
+        try:
+            db_items = read_profiles_for_group(gid, gname)
+        except Exception:
+            db_items = []
+
+        # 2. Загрузка онлайн-подписки
+        online_items: list[Server] = []
         url = g.get("url")
         if not no_fetch and url:
             data = prefetched[url] if (prefetched and url in prefetched) else fetch_subscription(url)
             if data is None:
-                src = "db"
-                warnings.append(f"Подписка «{gname}» (id {gid}) недоступна — взято из БД Throne (возможно устарело)")
+                if db_items:
+                    warnings.append(f"Подписка «{gname}» (id {gid}) недоступна онлайн — взято только из БД Throne")
+                else:
+                    warnings.append(f"Подписка «{gname}» (id {gid}) недоступна онлайн и отсутствует в БД")
             else:
                 pairs = parse_subscription(data)
                 for eng, obj in pairs:
                     srv, prt = extract_host_port(obj)
                     if not srv:
                         continue
-                    items.append(
+                    online_items.append(
                         Server(
                             group_id=gid,
                             group_name=gname,
@@ -115,10 +140,23 @@ def gather_sources(
                             source="fresh",
                         )
                     )
-        if not items:
-            items = read_profiles_for_group(gid, gname)
-            if src == "fresh" and items:
-                warnings.append(f"Подписка «{gname}» (id {gid}) не распознана — взято из БД Throne")
+                if not online_items and not db_items:
+                    warnings.append(f"Подписка «{gname}» (id {gid}) не содержит распознанных серверов")
+
+        # 3. Объединение и дедупликация (онлайн замещает дубликаты из БД)
+        items = dedupe_servers(db_items + online_items)
+
+        # 4. Решение о фильтрации небезопасных серверов
+        should_filter = (filter_insecure is True) or (filter_insecure is None and remove_insecure)
+        if should_filter and items:
+            safe, insecure = filter_insecure_servers(items)
+            if insecure:
+                warnings.append(
+                    f"Отфильтровано {len(insecure)} небезопасных серверов в группе «{gname}» "
+                    "(Insecure TLS / открытый трафик / устаревшие шифры)"
+                )
+            items = safe
+
         all_items.extend(dedupe_servers(items))
     return all_items, warnings
 

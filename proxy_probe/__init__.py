@@ -41,6 +41,14 @@ from .prober import (
     run_probe,
 )
 from .reporter import write_import_file, write_report
+from .security import (
+    STREAM_CIPHERS,
+    SecurityInfo,
+    SecurityLevel,
+    evaluate_security,
+    is_insecure_server,
+    is_private_host,
+)
 from .throne import (
     default_throne_dir,
     detect_throne_versions,
@@ -67,7 +75,10 @@ __all__ = [
     "RESULT_DEAD",
     "RESULT_OK",
     "RESULT_UNKNOWN",
+    "STREAM_CIPHERS",
     "ResultCache",
+    "SecurityInfo",
+    "SecurityLevel",
     "Server",
     "alloc_port",
     "build_singbox_config",
@@ -80,6 +91,7 @@ __all__ = [
     "default_throne_dir",
     "detect_throne_versions",
     "ensure_binaries",
+    "evaluate_security",
     "extract_host_port",
     "extract_tag",
     "fetch_geo",
@@ -91,6 +103,8 @@ __all__ = [
     "get_db_snapshot",
     "get_default_agy_bin",
     "interactive_select",
+    "is_insecure_server",
+    "is_private_host",
     "link_to_outbound",
     "main",
     "parse_outbound_doc",

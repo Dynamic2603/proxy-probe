@@ -98,5 +98,10 @@
       - Для sing-box: `"detour": "zapret-relay"` + инъекция релея в `outbounds`.
       - Для Xray: `"proxySettings": {"tag": "zapret-relay"}` + инъекция релея в `outbounds`.
       - Индикация в теге: `[zapret:S01]` фиксирует конкретный номер стратегии, спасшей узел.
+    - Бесшовное автоповышение прав UAC (Windows Seamless UAC Auto-Elevation):
+      - Модуль `proxy_probe/antidpi/elevation.py`: при запуске команд `benchmark` или `serve` без прав Администратора автоматически вызывается системный диалог Windows UAC (`ShellExecuteExW` с `lpVerb = "runas"`).
+      - Пользователю достаточно нажать «Да» в стандартном системном окне Windows.
+      - Повышенный дочерний процесс дублирует консольный вывод через `TeeOutput` в файл `data/benchmark_run.log`, после чего родительский неelevated процесс (включая консоль агента) мгновенно считывает и печатает весь лог выполнения.
+      - CLI-флаг отключения: `--no-elevate`.
 
 

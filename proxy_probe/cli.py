@@ -65,6 +65,8 @@ from .ui import (
 
 __all__ = ["main"]
 
+ANTIDPI_BATCH_SIZE: int = 150
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -239,6 +241,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="порт локального изолированного SOCKS5-релея (по умолчанию 10850)",
     )
     ap.add_argument(
+        "--antidpi-limit",
+        type=int,
+        default=0,
+        help="максимум DEAD-серверов для проверки в Stage 2 (0 = все пачками по 150, по умолчанию 0)",
+    )
+    ap.add_argument(
         "--isp",
         type=str,
         default=None,
@@ -295,6 +303,7 @@ class RuntimeContext:
     antidpi: bool = True
     antidpi_strategy: int | None = None
     antidpi_port: int = 10850
+    antidpi_limit: int = 0
     isp: str | None = None
     no_elevate: bool = False
     jobs: int = 16
@@ -388,6 +397,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         antidpi=bool(getattr(args, "antidpi", True)),
         antidpi_strategy=getattr(args, "antidpi_strategy", None),
         antidpi_port=int(getattr(args, "antidpi_port", 10850)),
+        antidpi_limit=int(getattr(args, "antidpi_limit", 0)),
         isp=getattr(args, "isp", None),
         no_elevate=bool(getattr(args, "no_elevate", False)),
         jobs=int(getattr(args, "jobs", 16)),
@@ -737,8 +747,10 @@ def _execute_antidpi_stage(
         if ep not in seen_endpoints:
             seen_endpoints.add(ep)
             dead_candidates.append(s)
-            if len(dead_candidates) >= 150:
-                break
+
+    limit = getattr(ctx, "antidpi_limit", 0)
+    if limit > 0 and len(dead_candidates) > limit:
+        dead_candidates = dead_candidates[:limit]
 
     if not dead_candidates:
         return 0
@@ -807,6 +819,7 @@ def _delegate_stage2_elevated(
         ],
         "antidpi_strategy": ctx.antidpi_strategy,
         "antidpi_port": ctx.antidpi_port,
+        "antidpi_limit": getattr(ctx, "antidpi_limit", 0),
         "isp": ctx.isp,
         "agy_bin": ctx.agy_bin,
         "agy_model": getattr(ctx, "agy_model", None),
@@ -960,6 +973,7 @@ def _run_stage2_worker(task_file: Path, log_file: Path | None = None) -> int:
             antidpi=True,
             antidpi_strategy=data.get("antidpi_strategy"),
             antidpi_port=int(data.get("antidpi_port", 10850)),
+            antidpi_limit=int(data.get("antidpi_limit", 0)),
             isp=data.get("isp"),
             use_geo_precheck=bool(data.get("use_geo_precheck", True)),
             check_web=bool(data.get("check_web", False)),
@@ -1035,12 +1049,8 @@ def _execute_antidpi_stage_core(
     from .antidpi.relay import ZapretRelay
     from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
 
-    target_ips = {s.server for s in dead_candidates if s.server}
-    if not target_ips:
+    if not dead_candidates:
         return 0
-
-    ports_set = sorted({str(s.server_port) for s in dead_candidates if s.server_port})
-    ports_str = ",".join(ports_set[:16]) or "443"
 
     try:
         current_isp = detect_current_isp(explicit_override=ctx.isp)
@@ -1071,97 +1081,122 @@ def _execute_antidpi_stage_core(
         console.print(f"[yellow]Anti-DPI: не удалось загрузить бинарники Zapret2 ({exc}). Пропуск Stage 2.[/yellow]")
         return 0
 
+    batch_size = ANTIDPI_BATCH_SIZE
+    total_candidates = len(dead_candidates)
+    batches = [dead_candidates[i : i + batch_size] for i in range(0, total_candidates, batch_size)]
+    num_batches = len(batches)
+
     console.print(
         f"\n[bold cyan]Stage 2: Anti-DPI Релей {isp_label}[/bold cyan] "
         f"(стратегия S{strat.number:02d} {strat.name[:35]}, "
-        f"целей: {len(target_ips)} IP, порт {ctx.antidpi_port})..."
+        f"узлов: {total_candidates}, пачек: {num_batches} по <={batch_size} IP, порт {ctx.antidpi_port})..."
     )
 
     relay_port = ctx.antidpi_port
     rescued_count = 0
+    init_desc = f"Anti-DPI спасение [пачка 1/{num_batches}]" if num_batches > 1 else "Anti-DPI попытка спасения"
     pbar = tqdm(
-        total=len(dead_candidates),
-        desc="Anti-DPI попытка спасения",
+        total=total_candidates,
+        desc=init_desc,
         unit="srv",
         dynamic_ncols=True,
     )
 
+    concurrency = getattr(ctx, "agy_concurrency", 2)
+    agy_semaphore = threading.Semaphore(concurrency)
+    model = getattr(ctx, "agy_model", None)
+    registry = ProcessRegistry()
+    stop_event = threading.Event()
+
+    stage2_timeouts = dict(timeouts)
+    stage2_timeouts["probe"] = min(timeouts.get("probe", 10.0), 5.0)
+    stage2_timeouts["start"] = min(timeouts.get("start", 6.0), 4.0)
+
     try:
-        with (
-            ZapretRelay(port=relay_port),
-            WinwsRunner(
-                strategy=strat,
-                target_ips=target_ips,
-                zapret_dir=zapret_dir,
-                ports=ports_str,
-            ),
-        ):
-            concurrency = getattr(ctx, "agy_concurrency", 2)
-            agy_semaphore = threading.Semaphore(concurrency)
-            model = getattr(ctx, "agy_model", None)
-            registry = ProcessRegistry()
-            stop_event = threading.Event()
+        with ZapretRelay(port=relay_port):
+            for b_idx, batch in enumerate(batches, start=1):
+                if stop_event.is_set():
+                    break
+                if num_batches > 1:
+                    pbar.set_description(f"Anti-DPI спасение [пачка {b_idx}/{num_batches}]")
 
-            stage2_timeouts = dict(timeouts)
-            stage2_timeouts["probe"] = min(timeouts.get("probe", 10.0), 5.0)
-            stage2_timeouts["start"] = min(timeouts.get("start", 6.0), 4.0)
+                batch_ips = {s.server for s in batch if s.server}
+                if not batch_ips:
+                    pbar.update(len(batch))
+                    continue
 
-            workers = min(len(dead_candidates), getattr(ctx, "jobs", 16), 16)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {}
-                for s in dead_candidates:
-                    patched_obj = apply_relay_detour(s.import_obj, is_xray=(s.engine == "xray"))
-                    _, relay_outbound = build_relay_detour(
-                        is_xray=(s.engine == "xray"),
-                        relay_port=relay_port,
-                    )
-                    bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
-                    fut = ex.submit(
-                        _probe_worker,
-                        bin_path,
-                        s.engine == "xray",
-                        patched_obj,
-                        stage2_timeouts,
-                        ctx.agy_bin,
-                        print_timeout,
-                        agy_model=model,
-                        agy_semaphore=agy_semaphore,
-                        circuit_breaker=circuit_breaker,
-                        stop_event=stop_event,
-                        registry=registry,
-                        use_geo_precheck=ctx.use_geo_precheck,
-                        check_web=ctx.check_web,
-                        extra_outbounds=[relay_outbound],
-                    )
-                    futures[fut] = s
+                batch_ports_set = sorted({str(s.server_port) for s in batch if s.server_port})
+                batch_ports_str = ",".join(batch_ports_set[:16]) or "443"
 
-                for fut in concurrent.futures.as_completed(futures):
-                    srv = futures[fut]
-                    try:
-                        res = fut.result()
-                    except Exception as exc:
-                        res = {"result": RESULT_DEAD, "note": str(exc)}
+                with WinwsRunner(
+                    strategy=strat,
+                    target_ips=batch_ips,
+                    zapret_dir=zapret_dir,
+                    ports=batch_ports_str,
+                ):
+                    workers = min(len(batch), getattr(ctx, "jobs", 16), 16)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                        futures = {}
+                        for s in batch:
+                            patched_obj = apply_relay_detour(s.import_obj, is_xray=(s.engine == "xray"))
+                            _, relay_outbound = build_relay_detour(
+                                is_xray=(s.engine == "xray"),
+                                relay_port=relay_port,
+                            )
+                            bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
+                            fut = ex.submit(
+                                _probe_worker,
+                                bin_path,
+                                s.engine == "xray",
+                                patched_obj,
+                                stage2_timeouts,
+                                ctx.agy_bin,
+                                print_timeout,
+                                agy_model=model,
+                                agy_semaphore=agy_semaphore,
+                                circuit_breaker=circuit_breaker,
+                                stop_event=stop_event,
+                                registry=registry,
+                                use_geo_precheck=ctx.use_geo_precheck,
+                                check_web=ctx.check_web,
+                                extra_outbounds=[relay_outbound],
+                            )
+                            futures[fut] = s
 
-                    if res.get("result") == RESULT_OK:
-                        srv.result = RESULT_OK
-                        srv.country = res.get("country", "")
-                        srv.ip_out = res.get("ip_out", "")
-                        srv.country_code = res.get("country_code", "")
-                        srv.city = res.get("city", "")
-                        srv.org = res.get("org", "")
-                        srv.latency_ms = res.get("latency_ms", 0)
-                        srv.note = f"оживлен через Zapret S{strat.number:02d}"
-                        srv.web_status = res.get("web_status", "")
-                        srv.ingress_country_code = res.get("ingress_country_code", "")
-                        srv.ingress_ip = res.get("ingress_ip", "")
-                        srv.antidpi_strategy = strat.number
-                        srv.state = STATE_ACTIVE
-                        rescued_count += 1
-                        if srv not in to_probe:
-                            to_probe.append(srv)
-                    pbar.update(1)
+                        for fut in concurrent.futures.as_completed(futures):
+                            srv = futures[fut]
+                            if stop_event.is_set():
+                                break
+                            try:
+                                res = fut.result()
+                            except Exception as exc:
+                                res = {"result": RESULT_DEAD, "note": str(exc)}
+
+                            if res.get("result") == RESULT_OK:
+                                srv.result = RESULT_OK
+                                srv.country = res.get("country", "")
+                                srv.ip_out = res.get("ip_out", "")
+                                srv.country_code = res.get("country_code", "")
+                                srv.city = res.get("city", "")
+                                srv.org = res.get("org", "")
+                                srv.latency_ms = res.get("latency_ms", 0)
+                                srv.note = f"оживлен через Zapret S{strat.number:02d}"
+                                srv.web_status = res.get("web_status", "")
+                                srv.ingress_country_code = res.get("ingress_country_code", "")
+                                srv.ingress_ip = res.get("ingress_ip", "")
+                                srv.antidpi_strategy = strat.number
+                                srv.state = STATE_ACTIVE
+                                rescued_count += 1
+                                if srv not in to_probe:
+                                    to_probe.append(srv)
+                            pbar.update(1)
+
+                if b_idx < num_batches and not stop_event.is_set():
+                    time.sleep(0.1)
 
     except KeyboardInterrupt:
+        stop_event.set()
+        registry.kill_all()
         console.print("\n[yellow]Stage 2 прерван пользователем.[/yellow]")
     except Exception as exc:
         console.print(f"[yellow]Ошибка работы Stage 2 Anti-DPI: {exc}[/yellow]")
@@ -1170,11 +1205,11 @@ def _execute_antidpi_stage_core(
 
     # Обновляем живой рейтинг на основе реального результата прогона
     if ratings is not None and current_isp is not None:
-        ratings.record_live_feedback(strat.number, rescued_count, len(dead_candidates))
+        ratings.record_live_feedback(strat.number, rescued_count, total_candidates)
         save_ratings(ratings, isp_identity=current_isp)
 
     if rescued_count > 0:
-        total_dead = len(dead_candidates)
+        total_dead = total_candidates
         console.print(
             f"[bold green]✓ Anti-DPI релей успешно оживил {rescued_count} из {total_dead} серверов![/bold green]"
         )

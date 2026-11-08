@@ -835,6 +835,175 @@ def test_collect_and_select_servers_refresh_dead() -> None:
         assert cached_counts.get(RESULT_DEAD) is None
 
 
+def test_cli_antidpi_limit_flag() -> None:
+    parser = build_arg_parser()
+    args_default = parser.parse_args([])
+    assert args_default.antidpi_limit == 0
+
+    args_custom = parser.parse_args(["--antidpi-limit", "300"])
+    assert args_custom.antidpi_limit == 300
+
+
+def test_setup_environment_antidpi_limit() -> None:
+    from proxy_probe.cli import _setup_environment
+
+    parser = build_arg_parser()
+    args = parser.parse_args(["--antidpi-limit", "150", "--skip-precheck", "--no-cache"])
+
+    with patch("proxy_probe.cli._resolve_agy_bin", return_value="agy"), \
+         patch("proxy_probe.cli.detect_throne_versions", return_value=("1.0", "1.0")), \
+         patch("proxy_probe.cli.ensure_binaries", return_value=(Path("sb"), Path("xr"))):
+        ctx = _setup_environment(args)
+
+    assert ctx.antidpi_limit == 150
+
+
+def test_execute_antidpi_stage_honors_limit() -> None:
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        antidpi_limit=50,
+    )
+    # Создаем 80 серверов с уникальными IP
+    servers = [
+        Server(
+            group_id=1,
+            group_name="Test",
+            name=f"s_{i}",
+            engine="sing-box",
+            server=f"10.0.{i // 250}.{i % 250 + 1}",
+            server_port=443,
+            import_obj={"server": f"10.0.{i // 250}.{i % 250 + 1}", "server_port": 443},
+            source="fresh",
+            result=RESULT_DEAD,
+        )
+        for i in range(80)
+    ]
+
+    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
+         patch("proxy_probe.cli._execute_antidpi_stage_core", return_value=0) as mock_core:
+        _execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
+        # Должны быть переданы ровно 50 из-за antidpi_limit=50
+        passed_candidates = mock_core.call_args[1]["dead_candidates"]
+        assert len(passed_candidates) == 50
+
+    # Проверяем, что при antidpi_limit=0 берутся все 80
+    ctx.antidpi_limit = 0
+    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
+         patch("proxy_probe.cli._execute_antidpi_stage_core", return_value=0) as mock_core:
+        _execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
+        passed_candidates = mock_core.call_args[1]["dead_candidates"]
+        assert len(passed_candidates) == 80
+
+
+def test_execute_antidpi_stage_multi_batch() -> None:
+    from proxy_probe.antidpi.models import StrategyProfile
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        antidpi_strategy=1,
+        antidpi_limit=0,
+    )
+    # Создаем 350 серверов (пачки: 150 + 150 + 50)
+    servers = [
+        Server(
+            group_id=1,
+            group_name="Test",
+            name=f"s_{i}",
+            engine="sing-box",
+            server=f"10.1.{i // 250}.{i % 250 + 1}",
+            server_port=443,
+            import_obj={"server": f"10.1.{i // 250}.{i % 250 + 1}", "server_port": 443},
+            source="fresh",
+            result=RESULT_DEAD,
+        )
+        for i in range(350)
+    ]
+
+    dummy_strat = StrategyProfile(
+        number=1,
+        family_number=1,
+        family_name="fake",
+        variant=1,
+        name="Fake Strategy",
+        chain="fake",
+        args=("--fake",),
+    )
+    mock_res = {
+        "result": RESULT_OK,
+        "country": "Germany",
+        "ip_out": "1.2.3.4",
+        "country_code": "DE",
+        "city": "Frankfurt",
+        "org": "Hetzner",
+        "latency_ms": 50,
+    }
+
+    runner_calls = []
+
+    class MockRunner:
+        def __init__(self, **kwargs):
+            runner_calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    with patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
+         patch("proxy_probe.antidpi.catalogue.get_strategy_by_number", return_value=dummy_strat), \
+         patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
+         patch("proxy_probe.antidpi.engine.WinwsRunner", side_effect=MockRunner), \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
+         patch("proxy_probe.cli._probe_worker", return_value=mock_res):
+        mock_relay.return_value.__enter__.return_value = None
+
+        to_probe: list[Server] = []
+        rescued = _execute_antidpi_stage(servers, to_probe, ctx, {}, "5s")
+
+    assert rescued == 350
+    # ZapretRelay должен быть создан ровно 1 раз
+    mock_relay.assert_called_once()
+    # WinwsRunner должен быть вызван 3 раза: для пачек 150, 150, 50
+    assert len(runner_calls) == 3
+    assert len(runner_calls[0]["target_ips"]) == 150
+    assert len(runner_calls[1]["target_ips"]) == 150
+    assert len(runner_calls[2]["target_ips"]) == 50
+    # Все серверы должны стать RESULT_OK
+    assert all(s.result == RESULT_OK for s in servers)
+    assert len(to_probe) == 350
+
+
+
 
 
 

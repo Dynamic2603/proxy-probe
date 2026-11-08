@@ -10,10 +10,12 @@ import argparse
 import concurrent.futures
 import contextlib
 import dataclasses
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -247,6 +249,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="не запрашивать повышение прав через UAC автоматически",
     )
+    ap.add_argument("--stage2-worker", type=str, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--log-output", type=str, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--no-pause", action="store_true", help="не ждать нажатия Enter перед выходом")
     return ap
 
@@ -292,6 +296,8 @@ class RuntimeContext:
     antidpi_strategy: int | None = None
     antidpi_port: int = 10850
     isp: str | None = None
+    no_elevate: bool = False
+    jobs: int = 16
 
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
@@ -383,6 +389,8 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         antidpi_strategy=getattr(args, "antidpi_strategy", None),
         antidpi_port=int(getattr(args, "antidpi_port", 10850)),
         isp=getattr(args, "isp", None),
+        no_elevate=bool(getattr(args, "no_elevate", False)),
+        jobs=int(getattr(args, "jobs", 16)),
     )
 
 
@@ -706,16 +714,8 @@ def _execute_antidpi_stage(
     if not ctx.antidpi:
         return 0
 
-    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings, save_ratings
-    from .antidpi.catalogue import get_strategy_by_number
-    from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
-    from .antidpi.isp import IspDetectionError, detect_current_isp
-    from .antidpi.relay import ZapretRelay
-    from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
+    from .antidpi.elevation import is_admin
 
-    # Кандидаты на спасение — свежепроверенные серверы текущего прогона (to_probe),
-    # отсекая те, у которых порт закрыт на уровне L4 TCP (нет смысла спасать закрытый сокет).
-    # Дедуплицируем по эндпоинту (по 1 представителю) и ограничиваем до 150 узлов (лимит WinDivert).
     candidates_pool = to_probe if to_probe else servers
     raw_candidates = [
         s for s in candidates_pool
@@ -738,6 +738,301 @@ def _execute_antidpi_stage(
             dead_candidates.append(s)
             if len(dead_candidates) >= 150:
                 break
+
+    if not dead_candidates:
+        return 0
+
+    if not is_admin():
+        if getattr(ctx, "no_elevate", False):
+            console.print(
+                "[yellow]⚠ Stage 2 Anti-DPI пропущен: запуск без прав Администратора (--no-elevate).[/yellow]"
+            )
+            return 0
+        return _delegate_stage2_elevated(
+            dead_candidates=dead_candidates,
+            servers=servers,
+            to_probe=to_probe,
+            ctx=ctx,
+            timeouts=timeouts,
+            print_timeout=print_timeout,
+        )
+
+    return _execute_antidpi_stage_core(
+        dead_candidates=dead_candidates,
+        to_probe=to_probe,
+        ctx=ctx,
+        timeouts=timeouts,
+        print_timeout=print_timeout,
+        circuit_breaker=circuit_breaker,
+    )
+
+
+def _delegate_stage2_elevated(
+    dead_candidates: list[Server],
+    servers: list[Server],
+    to_probe: list[Server],
+    ctx: RuntimeContext,
+    timeouts: dict[str, float],
+    print_timeout: str,
+) -> int:
+    from .antidpi.elevation import run_elevated_and_wait
+    from .models import RESULT_OK, STATE_ACTIVE
+
+    stage_dir = Path(tempfile.gettempdir()) / "proxy-probe"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    task_path = stage_dir / f"stage2_task_{pid}.json"
+    result_path = stage_dir / f"stage2_result_{pid}.json"
+    log_path = stage_dir / f"stage2_log_{pid}.log"
+
+    task_data = {
+        "cache_path": str(ctx.cache_path) if ctx.cache_path else "",
+        "sb_exe": str(ctx.sb_exe) if ctx.sb_exe else "",
+        "xr_exe": str(ctx.xr_exe) if ctx.xr_exe else "",
+        "dead_candidates": [
+            {
+                "cache_key": s.cache_key,
+                "config_identity": s.config_identity,
+                "server": s.server,
+                "server_port": s.server_port,
+                "engine": s.engine,
+                "import_obj": s.import_obj,
+                "group_id": s.group_id,
+                "group_name": s.group_name,
+                "name": s.name,
+                "source": s.source,
+            }
+            for s in dead_candidates
+        ],
+        "antidpi_strategy": ctx.antidpi_strategy,
+        "antidpi_port": ctx.antidpi_port,
+        "isp": ctx.isp,
+        "agy_bin": ctx.agy_bin,
+        "agy_model": getattr(ctx, "agy_model", None),
+        "agy_concurrency": getattr(ctx, "agy_concurrency", 2),
+        "jobs": getattr(ctx, "jobs", 16),
+        "timeouts": timeouts,
+        "print_timeout": print_timeout,
+        "use_geo_precheck": ctx.use_geo_precheck,
+        "check_web": ctx.check_web,
+        "result_path": str(result_path),
+    }
+    task_path.write_text(json.dumps(task_data, ensure_ascii=False), encoding="utf-8")
+
+    console.print("\n" + "=" * 70)
+    console.print("  proxy-probe: Запрос прав Администратора для проверки Anti-DPI (Stage 2)")
+    console.print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
+    console.print("=" * 70 + "\n")
+
+    elev_params = subprocess.list2cmdline([
+        "-m", "proxy_probe",
+        "--stage2-worker", str(task_path),
+        "--log-output", str(log_path),
+    ])
+
+    try:
+        rc = run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
+        if rc != 0 and rc != 1223:
+            console.print(f"[yellow]Stage 2 воркер завершился с кодом {rc}[/yellow]")
+    except PermissionError:
+        console.print(
+            "[yellow]⚠ Stage 2 Anti-DPI пропущен: запрос прав Администратора (UAC) отклонён пользователем.[/yellow]"
+        )
+        with contextlib.suppress(Exception):
+            task_path.unlink(missing_ok=True)
+        return 0
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Ошибка вызова UAC для Stage 2: {exc}[/yellow]")
+        with contextlib.suppress(Exception):
+            task_path.unlink(missing_ok=True)
+        return 0
+
+    with contextlib.suppress(Exception):
+        task_path.unlink(missing_ok=True)
+        log_path.unlink(missing_ok=True)
+
+    if not result_path.is_file():
+        return 0
+
+    rescued_count = 0
+    try:
+        result_data = json.loads(result_path.read_text(encoding="utf-8"))
+        rescued_map = {item["config_identity"]: item for item in result_data.get("rescued", [])}
+
+        for s in servers:
+            if s.config_identity in rescued_map:
+                info = rescued_map[s.config_identity]
+                s.result = info.get("result", RESULT_OK)
+                s.country = info.get("country", "")
+                s.ip_out = info.get("ip_out", "")
+                s.country_code = info.get("country_code", "")
+                s.city = info.get("city", "")
+                s.org = info.get("org", "")
+                s.latency_ms = info.get("latency_ms", 0)
+                s.note = info.get("note", "")
+                s.web_status = info.get("web_status", "")
+                s.ingress_country_code = info.get("ingress_country_code", "")
+                s.ingress_ip = info.get("ingress_ip", "")
+                s.antidpi_strategy = info.get("antidpi_strategy")
+                s.state = info.get("state", STATE_ACTIVE)
+                rescued_count += 1
+                if s not in to_probe:
+                    to_probe.append(s)
+
+        if ctx.cache:
+            for s in to_probe:
+                if s.result == RESULT_OK and s.config_identity in rescued_map:
+                    ctx.cache.entries[s.cache_key] = ctx.cache.entries.get(s.cache_key, {})
+                    ctx.cache.entries[s.cache_key].update({
+                        "result": s.result,
+                        "country": s.country,
+                        "ip_out": s.ip_out,
+                        "country_code": s.country_code,
+                        "city": s.city,
+                        "org": s.org,
+                        "latency_ms": s.latency_ms,
+                        "note": s.note,
+                        "web_status": s.web_status,
+                        "ingress_country_code": s.ingress_country_code,
+                        "ingress_ip": s.ingress_ip,
+                        "antidpi_strategy": s.antidpi_strategy,
+                        "state": s.state,
+                    })
+
+        if rescued_count > 0:
+            total_dead = len(dead_candidates)
+            console.print(
+                f"[bold green]✓ Anti-DPI релей успешно оживил {rescued_count} из {total_dead} серверов![/bold green]"
+            )
+        else:
+            console.print(
+                "\n[yellow]⚠ Anti-DPI: стратегия не смогла оживить упавшие узлы (0 спасено).[/yellow]"
+            )
+            console.print(
+                "[bold cyan]Рекомендуется выполнить экспресс-калибровку (Уровень 2):[/bold cyan]\n"
+                "[bold white]  Дважды кликните 'calibrate_level2.cmd' в папке проекта[/bold white]\n"
+            )
+    except Exception as exc:
+        console.print(f"[yellow]Ошибка обработки результатов Stage 2: {exc}[/yellow]")
+    finally:
+        with contextlib.suppress(Exception):
+            result_path.unlink(missing_ok=True)
+
+    return rescued_count
+
+
+def _run_stage2_worker(task_file: Path, log_file: Path | None = None) -> int:
+    from .antidpi.elevation import TeeOutput
+    from .models import RESULT_DEAD, RESULT_OK
+
+    cm = TeeOutput(log_file) if log_file else contextlib.nullcontext()
+    with cm:
+        if not task_file.is_file():
+            print(f"Task file not found: {task_file}", file=sys.stderr)
+            return 1
+        try:
+            data = json.loads(task_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"Failed to read task file {task_file}: {exc}", file=sys.stderr)
+            return 1
+
+        cache_path = Path(data["cache_path"]) if data.get("cache_path") else default_cache_path()
+        cache = ResultCache(path=cache_path) if cache_path.is_file() else None
+
+        sb_exe = Path(data.get("sb_exe", ""))
+        xr_exe = Path(data.get("xr_exe", ""))
+
+        ctx = RuntimeContext(
+            agy_bin=data.get("agy_bin", ""),
+            agy_model=data.get("agy_model"),
+            agy_concurrency=int(data.get("agy_concurrency", 2)),
+            initial_circuit_breaker=None,
+            cache=cache,
+            cache_path=cache_path,
+            ttl_map={},
+            report_path=Path("dummy"),
+            import_path=Path("dummy"),
+            ver_sb="",
+            ver_xr="",
+            sb_exe=sb_exe,
+            xr_exe=xr_exe,
+            antidpi=True,
+            antidpi_strategy=data.get("antidpi_strategy"),
+            antidpi_port=int(data.get("antidpi_port", 10850)),
+            isp=data.get("isp"),
+            use_geo_precheck=bool(data.get("use_geo_precheck", True)),
+            check_web=bool(data.get("check_web", False)),
+            jobs=int(data.get("jobs", 16)),
+        )
+
+        dead_candidates: list[Server] = []
+        for d in data.get("dead_candidates", []):
+            s = Server(
+                group_id=d.get("group_id", 0),
+                group_name=d.get("group_name", ""),
+                name=d.get("name", ""),
+                engine=d.get("engine", "sing-box"),
+                server=d.get("server", ""),
+                server_port=d.get("server_port", 443),
+                import_obj=d.get("import_obj", {}),
+                source=d.get("source", "db"),
+                result=RESULT_DEAD,
+            )
+            dead_candidates.append(s)
+
+        to_probe: list[Server] = []
+        _execute_antidpi_stage_core(
+            dead_candidates=dead_candidates,
+            to_probe=to_probe,
+            ctx=ctx,
+            timeouts=data.get("timeouts", {}),
+            print_timeout=data.get("print_timeout", AGY_PRINT_TIMEOUT_DEFAULT),
+            circuit_breaker=None,
+        )
+
+        result_path = Path(data["result_path"])
+        rescued_items = []
+        for s in dead_candidates:
+            if s.result == RESULT_OK:
+                rescued_items.append({
+                    "config_identity": s.config_identity,
+                    "cache_key": s.cache_key,
+                    "result": s.result,
+                    "country": s.country,
+                    "ip_out": s.ip_out,
+                    "country_code": s.country_code,
+                    "city": s.city,
+                    "org": s.org,
+                    "latency_ms": s.latency_ms,
+                    "note": s.note,
+                    "web_status": s.web_status,
+                    "ingress_country_code": s.ingress_country_code,
+                    "ingress_ip": s.ingress_ip,
+                    "antidpi_strategy": s.antidpi_strategy,
+                    "state": s.state,
+                })
+
+        result_path.write_text(
+            json.dumps({"rescued": rescued_items}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return 0
+
+
+def _execute_antidpi_stage_core(
+    dead_candidates: list[Server],
+    to_probe: list[Server],
+    ctx: RuntimeContext,
+    timeouts: dict[str, float],
+    print_timeout: str,
+    circuit_breaker: QuotaCircuitBreaker | None = None,
+) -> int:
+    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings, save_ratings
+    from .antidpi.catalogue import get_strategy_by_number
+    from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
+    from .antidpi.isp import IspDetectionError, detect_current_isp
+    from .antidpi.relay import ZapretRelay
+    from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
 
     target_ips = {s.server for s in dead_candidates if s.server}
     if not target_ips:
@@ -984,6 +1279,13 @@ def main() -> None:
     load_dotenv()
     args = build_arg_parser().parse_args()
 
+    if getattr(args, "stage2_worker", None):
+        rc = _run_stage2_worker(
+            task_file=Path(args.stage2_worker),
+            log_file=Path(args.log_output) if getattr(args, "log_output", None) else None,
+        )
+        sys.exit(rc)
+
     if args.throne_dir:
         set_throne_dir(args.throne_dir)
 
@@ -992,27 +1294,6 @@ def main() -> None:
         if recfg is not None:
             with contextlib.suppress(ValueError):
                 recfg(encoding="utf-8", errors="replace")
-
-    if args.antidpi and not getattr(args, "no_elevate", False):
-        from .antidpi.elevation import is_admin, run_elevated_and_wait
-
-        if not is_admin():
-            print("=" * 70)
-            print("  proxy-probe: Запрос прав Администратора для WinDivert (Zapret2)")
-            print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
-            print("=" * 70)
-            raw_argv = sys.argv[1:]
-            extra_args = [a for a in raw_argv if a != "--no-elevate"]
-            elev_params = subprocess.list2cmdline(["-m", "proxy_probe", *extra_args])
-            try:
-                rc = run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
-                sys.exit(rc)
-            except PermissionError as exc:
-                print(f"\n[!] {exc}", file=sys.stderr)
-                sys.exit(1223)
-            except Exception as exc:
-                print(f"\n[!] Ошибка вызова UAC: {exc}", file=sys.stderr)
-                sys.exit(1)
 
     ctx = _setup_environment(args)
 

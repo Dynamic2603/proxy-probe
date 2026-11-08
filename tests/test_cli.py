@@ -582,6 +582,7 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
          patch("proxy_probe.antidpi.catalogue.get_strategy_by_number", return_value=dummy_strat), \
          patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
          patch("proxy_probe.antidpi.engine.WinwsRunner") as mock_runner, \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
          patch("proxy_probe.cli._probe_worker", return_value=mock_res):
         mock_relay.return_value.__enter__.return_value = None
         mock_runner.return_value.__enter__.return_value = None
@@ -594,6 +595,157 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
     assert s.antidpi_strategy == 1
     assert s.country_code == "DE"
     assert s in to_probe
+
+
+def test_execute_antidpi_stage_no_elevate() -> None:
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        no_elevate=True,
+    )
+    s = Server(
+        group_id=1,
+        group_name="Test",
+        name="s1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"server": "1.1.1.1", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+    )
+    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False):
+        rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+    assert rescued == 0
+    assert s.result == RESULT_DEAD
+
+
+def test_execute_antidpi_stage_uac_cancelled() -> None:
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=Path("fake"),
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        no_elevate=False,
+    )
+    s = Server(
+        group_id=1,
+        group_name="Test",
+        name="s1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"server": "1.1.1.1", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+    )
+
+    def mock_run_elevated(**_):
+        raise PermissionError("UAC rejected")
+
+    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=mock_run_elevated):
+        rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+
+    assert rescued == 0
+    assert s.result == RESULT_DEAD
+
+
+def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
+    import json
+
+    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+
+    ctx = RuntimeContext(
+        agy_bin="fake",
+        agy_model=None,
+        agy_concurrency=2,
+        initial_circuit_breaker=None,
+        cache=None,
+        cache_path=tmp_path / "results.json",
+        ttl_map={},
+        report_path=Path("fake"),
+        import_path=Path("fake"),
+        ver_sb="1.0",
+        ver_xr="1.0",
+        sb_exe=Path("sb"),
+        xr_exe=Path("xr"),
+        antidpi=True,
+        no_elevate=False,
+    )
+    s = Server(
+        group_id=1,
+        group_name="Test",
+        name="s1",
+        engine="sing-box",
+        server="1.1.1.1",
+        server_port=443,
+        import_obj={"server": "1.1.1.1", "server_port": 443},
+        source="fresh",
+        result=RESULT_DEAD,
+    )
+
+    def fake_run_elevated(executable, params, cwd):
+        # Эмулируем запись результата воркером
+        for part in params.split():
+            if "stage2_task_" in part and part.endswith(".json"):
+                task_file = Path(part)
+                if task_file.is_file():
+                    data = json.loads(task_file.read_text(encoding="utf-8"))
+                    res_file = Path(data["result_path"])
+                    res_file.write_text(
+                        json.dumps({
+                            "rescued": [{
+                                "config_identity": s.config_identity,
+                                "cache_key": s.cache_key,
+                                "result": RESULT_OK,
+                                "country_code": "DE",
+                                "antidpi_strategy": 15,
+                                "state": "ACTIVE",
+                                "note": "rescued",
+                            }]
+                        }),
+                        encoding="utf-8",
+                    )
+        return 0
+
+    to_probe: list[Server] = []
+    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=fake_run_elevated):
+        rescued = _execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
+
+    assert rescued == 1
+    assert s.result == RESULT_OK
+    assert s.country_code == "DE"
+    assert s.antidpi_strategy == 15
+    assert s in to_probe
+
 
 
 def test_sync_and_save_cache_flushes_to_disk(tmp_path: Path) -> None:

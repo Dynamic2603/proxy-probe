@@ -103,10 +103,11 @@
       - Для sing-box: `"detour": "zapret-relay"` + инъекция релея в `outbounds`.
       - Для Xray: `"proxySettings": {"tag": "zapret-relay"}` + инъекция релея в `outbounds`.
       - Индикация в теге: `[zapret]` обозначает серверы, маршрутизируемые через локальный Zapret-релей.
-    - Бесшовное автоповышение прав UAC (Windows Seamless UAC Auto-Elevation):
-      - Модуль `proxy_probe/antidpi/elevation.py`: при запуске команд `benchmark` или `serve` без прав Администратора автоматически вызывается системный диалог Windows UAC (`ShellExecuteExW` с `lpVerb = "runas"`).
-      - Пользователю достаточно нажать «Да» в стандартном системном окне Windows.
-      - Повышенный дочерний процесс дублирует консольный вывод через `TeeOutput` в файл `data/benchmark_run.log`, после чего родительский неelevated процесс (включая консоль агента) мгновенно считывает и печатает весь лог выполнения.
+    - Бесшовное автоповышение прав UAC строго для Stage 2 Anti-DPI (Windows Just-in-Time UAC Elevation):
+      - `run.cmd`, чтение базы Throne, загрузка подписок, меню, Stage 0 TCP и Stage 1 движков работают на 100% без прав Администратора (обычный пользовательский процесс).
+      - Права Администратора запрашиваются строго just-in-time и исключительно для Stage 2 Anti-DPI (через воркер `_delegate_stage2_elevated`), когда в пуле обнаружены серверы со статусом `DEAD` с открытым TCP-портом для спасения через WinDivert.
+      - При отсутствии упавших серверов или флаге `--no-antidpi` UAC не запрашивается вовсе. При отказе пользователя от UAC (нажатие «Нет») основной пайплайн не падает, а корректно финализирует и экспортирует результаты Stage 1.
+      - Модуль `proxy_probe/antidpi/elevation.py`: команды `benchmark` и `serve` также автоматически запрашивают системный диалог Windows UAC (`ShellExecuteExW` с `lpVerb = "runas"`).
       - CLI-флаг отключения: `--no-elevate`.
 18. **Мультипровайдерная изоляция рейтингов Anti-DPI (Per-ISP / Per-ASN Ingress Isolation)**:
     - Автодетект входящей сети пользователя через ASN (Autonomous System Number) IANA/RIPE: `proxy_probe/antidpi/isp.py` (`IspIdentity: AS<asn>_<slug>`).

@@ -238,6 +238,23 @@ def test_prepare_strategies_for_level() -> None:
     assert l3[0].number == 2
     assert l3[1].number == 1
 
+    # Уровень 2: при большом количестве записей в живом рейтинге не должен разрастаться свыше 25
+    many_cat = [
+        StrategyProfile(i, i % 10, f"family_{i % 10}", 1, f"S{i}", "", ())
+        for i in range(1, 100)
+    ]
+    many_living = AntidpiBenchmarkResult(
+        tested_at="",
+        isp="",
+        best_strategy_number=1,
+        ratings=[
+            StrategyRating(i, f"S{i}", f"family_{i % 10}", 1, 1, 1.0, 50, 80, status="ACTIVE")
+            for i in range(1, 100)
+        ],
+    )
+    l2_capped = prepare_strategies_for_level(2, many_cat, many_living)
+    assert 20 <= len(l2_capped) <= 25
+
 
 def test_select_dead_servers_safe_ceiling() -> None:
     # Генерируем 150 серверов

@@ -196,7 +196,7 @@ def prepare_strategies_for_level(
     living = living_ratings.ratings if living_ratings else []
 
     if cfg.strategy_mode == "diversity":
-        # Сначала проверенные лидеры живого рейтинга (Fast-Path), затем срез разнообразия механик
+        # Сначала проверенные топ-лидеры живого рейтинга (до 3), затем срез разнообразия механик (суммарно до 25)
         selected: list[StrategyProfile] = []
         seen: set[int] = set()
 
@@ -204,11 +204,15 @@ def prepare_strategies_for_level(
             if r.score > 0 and r.strategy_number in cat_by_num:
                 selected.append(cat_by_num[r.strategy_number])
                 seen.add(r.strategy_number)
+            if len(selected) >= 3:
+                break
 
         for p in select_mechanical_diversity_sample(catalogue, limit=25):
             if p.number not in seen:
                 selected.append(p)
                 seen.add(p.number)
+            if len(selected) >= 25:
+                break
 
         return selected
 

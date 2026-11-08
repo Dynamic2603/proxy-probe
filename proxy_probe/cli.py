@@ -732,7 +732,7 @@ def _execute_antidpi_stage(
 
     from .antidpi.elevation import is_admin
 
-    candidates_pool = to_probe if to_probe else servers
+    candidates_pool = servers
     raw_candidates = [
         s for s in candidates_pool
         if s.result == RESULT_DEAD

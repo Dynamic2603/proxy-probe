@@ -173,3 +173,27 @@ def test_print_summary_panel_renders_stats() -> None:
         assert "Задержка (AGY-OK)" in panel_text
         assert "Хостинг-провайдеры" in panel_text
         assert "Hetzner Online GmbH" in panel_text
+
+
+def test_print_summary_panel_cached_header() -> None:
+    s_fresh = Server(1, "G1", "S1", "sing-box", "1.1.1.1", 443, {}, "fresh", result=RESULT_OK, from_cache=False)
+    s_cached = Server(1, "G1", "S2", "sing-box", "2.2.2.2", 443, {}, "db", result=RESULT_DEAD, from_cache=True)
+
+    with patch.object(console, "print") as mock_print:
+        print_summary_panel(
+            servers=[s_fresh, s_cached],
+            cached_counts={"DEAD": 1},
+            report_path=Path("report.md"),
+            import_path=Path("proxy-ok.txt"),
+            nb=1,
+            nx=0,
+            elapsed_s=10.0,
+        )
+        panel = mock_print.call_args[0][0]
+        panel_text = str(panel.renderable)
+        assert "Всего в пуле:" in panel_text
+        assert "2 серверов" in panel_text
+        assert "проверено:" in panel_text
+        assert "1 за" in panel_text
+        assert "из кэша:" in panel_text
+

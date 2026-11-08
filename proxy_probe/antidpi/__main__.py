@@ -226,88 +226,93 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     if profiler:
         profiler.enable()
 
-    with ZapretRelay(port=relay_port):
-        for idx, strat in enumerate(test_strategies, 1):
-            print(f"[{idx}/{len(test_strategies)}] Тестирование S{strat.number:02d}: {strat.name[:45]}...")
-            try:
-                with WinwsRunner(
-                    strategy=strat,
-                    target_ips=target_ips,
-                    zapret_dir=zapret_dir,
-                    ports=ports_str,
-                ):
-                    time.sleep(0.3)
-                    rescued = 0
-                    latencies: list[int] = []
-                    rescued_servers: list[tuple[Server, int]] = []
-                    failed_reasons: dict[str, int] = {}
-                    server_details: list[tuple[Server, bool, int, str]] = []
+    try:
+        with ZapretRelay(port=relay_port):
+            for idx, strat in enumerate(test_strategies, 1):
+                print(f"[{idx}/{len(test_strategies)}] Тестирование S{strat.number:02d}: {strat.name[:45]}...")
+                try:
+                    with WinwsRunner(
+                        strategy=strat,
+                        target_ips=target_ips,
+                        zapret_dir=zapret_dir,
+                        ports=ports_str,
+                    ):
+                        time.sleep(0.3)
+                        rescued = 0
+                        latencies: list[int] = []
+                        rescued_servers: list[tuple[Server, int]] = []
+                        failed_reasons: dict[str, int] = {}
+                        server_details: list[tuple[Server, bool, int, str]] = []
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                        futs = {
-                            ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=probe_timeout): srv
-                            for srv in selected
-                        }
-                        for fut in concurrent.futures.as_completed(futs):
-                            srv = futs[fut]
-                            try:
-                                ok, lat_ms, reason = fut.result()
-                            except Exception as exc:
-                                ok, lat_ms, reason = False, 0, f"исключение: {exc}"
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                            futs = {
+                                ex.submit(probe_proxy_tunnel, srv, relay_port=relay_port, timeout=probe_timeout): srv
+                                for srv in selected
+                            }
+                            for fut in concurrent.futures.as_completed(futs):
+                                srv = futs[fut]
+                                try:
+                                    ok, lat_ms, reason = fut.result()
+                                except Exception as exc:
+                                    ok, lat_ms, reason = False, 0, f"исключение: {exc}"
 
-                            server_details.append((srv, ok, lat_ms, reason))
-                            if ok:
-                                rescued += 1
-                                latencies.append(lat_ms)
-                                rescued_servers.append((srv, lat_ms))
-                                server_rescue_map.setdefault(srv.server, []).append((strat.number, lat_ms))
-                            else:
-                                failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                                server_details.append((srv, ok, lat_ms, reason))
+                                if ok:
+                                    rescued += 1
+                                    latencies.append(lat_ms)
+                                    rescued_servers.append((srv, lat_ms))
+                                    server_rescue_map.setdefault(srv.server, []).append((strat.number, lat_ms))
+                                else:
+                                    failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
 
-                    avg_lat = int(sum(latencies) / len(latencies)) if latencies else 0
-                    rate = rescued / len(selected) if selected else 0
-                    score = calculate_strategy_score(rescued, len(selected), avg_lat)
-                    r = StrategyRating(
-                        strategy_number=strat.number,
-                        strategy_name=strat.name,
-                        family_name=strat.technical_family,
-                        rescued_count=rescued,
-                        total_tested=len(selected),
-                        success_rate=rate,
-                        avg_latency_ms=avg_lat,
-                        score=score,
-                        status="TOP" if score >= 80 else ("ACTIVE" if rescued > 0 else "DEAD"),
-                        consecutive_failures=0 if rescued > 0 else 1,
-                        last_tested=_dt.datetime.now().isoformat(),
-                        last_success=_dt.datetime.now().isoformat() if rescued > 0 else "",
-                    )
-                    ratings.append(r)
-                    pct = int(rate * 100)
-                    lat_str = f"{avg_lat} мс" if avg_lat > 0 else "—"
-                    print(
-                        f"    -> Спасено: {rescued}/{len(selected)} ({pct}%), "
-                        f"задержка: {lat_str}, скор: {score}"
-                    )
-
-                    # Вывод спасенных узлов
-                    if rescued_servers:
-                        for srv, lat_val in rescued_servers:
-                            print(f"       [+] Спасен: {srv.server}:{srv.server_port} ({lat_val} мс) — {srv.name[:35]}")
-
-                    # Вывод причин сбоев
-                    if failed_reasons:
-                        reasons_str = ", ".join(
-                            f"{reason}: {cnt}" for reason, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1])
+                        avg_lat = int(sum(latencies) / len(latencies)) if latencies else 0
+                        rate = rescued / len(selected) if selected else 0
+                        score = calculate_strategy_score(rescued, len(selected), avg_lat)
+                        r = StrategyRating(
+                            strategy_number=strat.number,
+                            strategy_name=strat.name,
+                            family_name=strat.technical_family,
+                            rescued_count=rescued,
+                            total_tested=len(selected),
+                            success_rate=rate,
+                            avg_latency_ms=avg_lat,
+                            score=score,
+                            status="TOP" if score >= 80 else ("ACTIVE" if rescued > 0 else "DEAD"),
+                            consecutive_failures=0 if rescued > 0 else 1,
+                            last_tested=_dt.datetime.now().isoformat(),
+                            last_success=_dt.datetime.now().isoformat() if rescued > 0 else "",
                         )
-                        print(f"       [-] Причины сбоев: {reasons_str}")
+                        ratings.append(r)
+                        pct = int(rate * 100)
+                        lat_str = f"{avg_lat} мс" if avg_lat > 0 else "—"
+                        print(
+                            f"    -> Спасено: {rescued}/{len(selected)} ({pct}%), "
+                            f"задержка: {lat_str}, скор: {score}"
+                        )
 
-                    # Детализация при --verbose
-                    if getattr(args, "verbose", False):
-                        for srv, ok, lat_val, reason in server_details:
-                            mark = f"[+] {lat_val} мс" if ok else f"[-] {reason}"
-                            print(f"           * {srv.server}:{srv.server_port} -> {mark}")
-            except Exception as exc:
-                print(f"    -> Ошибка запуска стратегии S{strat.number:02d}: {exc}")
+                        # Вывод спасенных узлов
+                        if rescued_servers:
+                            for srv, lat_val in rescued_servers:
+                                print(
+                                    f"       [+] Спасен: {srv.server}:{srv.server_port} "
+                                    f"({lat_val} мс) — {srv.name[:35]}"
+                                )
+
+                        # Вывод причин сбоев
+                        if failed_reasons:
+                            sorted_reasons = sorted(failed_reasons.items(), key=lambda x: -x[1])
+                            reasons_str = ", ".join(f"{reason}: {cnt}" for reason, cnt in sorted_reasons)
+                            print(f"       [-] Причины сбоев: {reasons_str}")
+
+                        # Детализация при --verbose
+                        if getattr(args, "verbose", False):
+                            for srv, ok, lat_val, reason in server_details:
+                                mark = f"[+] {lat_val} мс" if ok else f"[-] {reason}"
+                                print(f"           * {srv.server}:{srv.server_port} -> {mark}")
+                except Exception as exc:
+                    print(f"    -> Ошибка запуска стратегии S{strat.number:02d}: {exc}")
+    except KeyboardInterrupt:
+        print("\n[!] Калибровка прервана пользователем (Ctrl+C). Сохранение промежуточных результатов...")
 
     if profiler:
         profiler.disable()

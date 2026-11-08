@@ -204,9 +204,18 @@ def print_summary_panel(
 
     tested_count = stats.tested
     total_count = stats.total
+    cached_total = sum(1 for s in servers if getattr(s, "from_cache", False))
+    fresh_tested = sum(1 for s in servers if not getattr(s, "from_cache", False) and s.result)
+
     if tested_count < total_count:
         stat = f"{tested_count} из {total_count} (прервано)"
         header = f"[bold]Проверено серверов:[/] {stat} за [cyan]{elapsed_s:.1f} с[/cyan]"
+    elif cached_total > 0:
+        header = (
+            f"[bold]Всего в пуле:[/] {total_count} серверов "
+            f"([green]проверено:[/] {fresh_tested} за [cyan]{elapsed_s:.1f} с[/cyan], "
+            f"[dim]из кэша:[/] {cached_total})"
+        )
     else:
         header = f"[bold]Всего проверено:[/] {total_count} серверов за [cyan]{elapsed_s:.1f} с[/cyan]"
     lines: list[str] = [header]

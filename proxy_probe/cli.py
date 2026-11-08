@@ -145,6 +145,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="принудительно перепроверить серверы со статусом DEAD из кэша (сохраняя AGY-OK и AGY-BLOCK)",
     )
     ap.add_argument(
+        "--clear-dead",
+        action="store_true",
+        help="удалить из кэша results.json все записи со статусом DEAD и сразу завершить работу",
+    )
+    ap.add_argument(
         "--filter-insecure",
         action="store_true",
         default=None,
@@ -1321,6 +1326,19 @@ def main() -> None:
             log_file=Path(args.log_output) if getattr(args, "log_output", None) else None,
         )
         sys.exit(rc)
+
+    if getattr(args, "clear_dead", False):
+        cache_path = Path(args.cache) if args.cache else default_cache_path()
+        if not cache_path.is_file():
+            console.print(f"[yellow]Файл кэша {cache_path} не найден.[/yellow]")
+            return
+        cache = ResultCache(path=cache_path)
+        removed = cache.clear_dead()
+        console.print(
+            f"[green]✓ Из кэша {cache_path.name} удалено {removed} записей со статусом DEAD. "
+            f"Осталось записей: {len(cache.entries)}.[/green]"
+        )
+        return
 
     if args.throne_dir:
         set_throne_dir(args.throne_dir)

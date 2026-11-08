@@ -397,3 +397,31 @@ def test_cache_lazy_normalization_backward_compatibility(tmp_path: Path) -> None
     assert rec_dead["state"] == STATE_DEAD
     assert rec_dead["score"] == 0
 
+
+def test_result_cache_clear_dead(tmp_path: Path) -> None:
+    cache_file = tmp_path / "results.json"
+    cache = ResultCache(path=cache_file)
+    cache.entries = {
+        "ok1": {"result": RESULT_OK},
+        "dead1": {"result": RESULT_DEAD},
+        "dead2": {"result": RESULT_DEAD},
+        "block1": {"result": RESULT_BLOCK},
+    }
+    cache.save()
+
+    # Очищаем DEAD
+    removed = cache.clear_dead()
+    assert removed == 2
+    assert len(cache.entries) == 2
+    assert "ok1" in cache.entries
+    assert "block1" in cache.entries
+    assert "dead1" not in cache.entries
+    assert "dead2" not in cache.entries
+
+    # Проверяем, что изменения сохранены на диск
+    reloaded = ResultCache(path=cache_file)
+    assert len(reloaded.entries) == 2
+    assert "ok1" in reloaded.entries
+    assert "block1" in reloaded.entries
+
+

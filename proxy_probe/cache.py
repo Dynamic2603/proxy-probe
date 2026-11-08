@@ -8,6 +8,7 @@ from typing import Any
 from .models import (
     DEFAULT_TTLS,
     MAX_CONSECUTIVE_FAILS,
+    RESULT_DEAD,
     RESULT_OK,
     RESULT_PRIORITIES,
     STATE_ACTIVE,
@@ -284,6 +285,15 @@ class ResultCache:
             if rec_changed:
                 changed_count += 1
         return changed_count
+
+    def clear_dead(self) -> int:
+        """Удаляет из кэша все записи со статусом DEAD и сохраняет файл."""
+        before = len(self.entries)
+        self.entries = {k: v for k, v in self.entries.items() if v.get("result") != RESULT_DEAD}
+        removed = before - len(self.entries)
+        if removed:
+            self.save()
+        return removed
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

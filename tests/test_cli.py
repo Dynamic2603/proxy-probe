@@ -1003,6 +1003,29 @@ def test_execute_antidpi_stage_multi_batch() -> None:
     assert len(to_probe) == 350
 
 
+def test_cli_clear_dead_flag(tmp_path: Path) -> None:
+    from proxy_probe.cache import ResultCache
+    from proxy_probe.cli import main
+
+    cache_file = tmp_path / "test_results.json"
+    cache = ResultCache(path=cache_file)
+    cache.entries = {
+        "ok": {"result": RESULT_OK},
+        "dead": {"result": RESULT_DEAD},
+    }
+    cache.save()
+
+    test_args = ["pxp", "--cache", str(cache_file), "--clear-dead"]
+    with patch("sys.argv", test_args):
+        main()
+
+    reloaded = ResultCache(path=cache_file)
+    assert len(reloaded.entries) == 1
+    assert "ok" in reloaded.entries
+    assert "dead" not in reloaded.entries
+
+
+
 
 
 

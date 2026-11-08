@@ -453,6 +453,7 @@ def _collect_and_select_servers(
             s.web_status = str(rec.get("web_status", ""))
             s.ingress_country_code = str(rec.get("ingress_country_code", ""))
             s.ingress_ip = str(rec.get("ingress_ip", ""))
+            s.from_cache = True
             cached_counts[res] = cached_counts.get(res, 0) + 1
             cached_unique_hosts.setdefault(res, set()).add(s.host_port)
         else:
@@ -721,7 +722,7 @@ def _execute_antidpi_stage(
         s for s in candidates_pool
         if s.result == RESULT_DEAD
         and s.server
-        and not (s.note and "L4 TCP" in s.note)
+        and not (s.note and (s.note.startswith("tcp:") or "L4 TCP" in s.note))
     ]
     if not raw_candidates:
         console.print(

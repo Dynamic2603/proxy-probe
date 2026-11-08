@@ -91,7 +91,7 @@ def test_compute_summary_stats_latency_and_geo() -> None:
 
 
 def test_compute_summary_stats_group_order_and_rate() -> None:
-    # Groups appearance: Group B (gid=20), Group A (gid=10)
+    # Group B has 1 fresh OK, Group A has 2 fresh OK
     s1 = _make_server(1, gid=20, gname="Group B", result=RESULT_OK)
     s2 = _make_server(2, gid=20, gname="Group B", result=RESULT_DEAD)
     s3 = _make_server(3, gid=10, gname="Group A", result=RESULT_OK)
@@ -99,16 +99,40 @@ def test_compute_summary_stats_group_order_and_rate() -> None:
 
     stats = compute_summary_stats([s1, s2, s3, s4])
     assert len(stats.group_stats) == 2
-    # Preserves first appearance order: Group B first, then Group A
-    assert stats.group_stats[0].group_id == 20
-    assert stats.group_stats[0].ok_count == 1
+    # Сортировка по выявленным свежим AGY-OK: Group A (2 OK) впереди Group B (1 OK)
+    assert stats.group_stats[0].group_id == 10
+    assert stats.group_stats[0].ok_count == 2
+    assert stats.group_stats[0].fresh_ok_count == 2
     assert stats.group_stats[0].total_count == 2
-    assert stats.group_stats[0].success_rate == 50.0
+    assert stats.group_stats[0].success_rate == 100.0
 
-    assert stats.group_stats[1].group_id == 10
-    assert stats.group_stats[1].ok_count == 2
+    assert stats.group_stats[1].group_id == 20
+    assert stats.group_stats[1].ok_count == 1
+    assert stats.group_stats[1].fresh_ok_count == 1
     assert stats.group_stats[1].total_count == 2
-    assert stats.group_stats[1].success_rate == 100.0
+    assert stats.group_stats[1].success_rate == 50.0
+
+
+def test_compute_summary_stats_group_fresh_vs_cached_sorting() -> None:
+    # Group Cached has 10 OK from cache (0 fresh)
+    cached_servers = [
+        _make_server(i, gid=1, gname="Cached Group", result=RESULT_OK)
+        for i in range(10)
+    ]
+    for s in cached_servers:
+        s.from_cache = True
+
+    # Group Fresh has only 1 OK, but it is freshly verified in this run
+    fresh_s = _make_server(100, gid=2, gname="Fresh Group", result=RESULT_OK)
+    fresh_s.from_cache = False
+
+    stats = compute_summary_stats([*cached_servers, fresh_s])
+    assert len(stats.group_stats) == 2
+    # Fresh Group (1 fresh OK) must be ranked ahead of Cached Group (0 fresh OK)
+    assert stats.group_stats[0].group_id == 2
+    assert stats.group_stats[0].fresh_ok_count == 1
+    assert stats.group_stats[1].group_id == 1
+    assert stats.group_stats[1].fresh_ok_count == 0
 
 
 def test_compute_summary_stats_failure_classification() -> None:

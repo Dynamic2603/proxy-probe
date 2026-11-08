@@ -31,6 +31,7 @@ class GroupStat:
     ok_count: int
     total_count: int
     success_rate: float
+    fresh_ok_count: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,16 +137,20 @@ def compute_summary_stats(servers: list[Server]) -> SummaryStats:
                 "name": s.group_name or f"Group {gid}",
                 "total": 0,
                 "ok": 0,
+                "fresh_ok": 0,
             }
         groups_data[gid]["total"] += 1
         if s.result == RESULT_OK or s.state == STATE_DEGRADED:
             groups_data[gid]["ok"] += 1
+        if s.result == RESULT_OK and not getattr(s, "from_cache", False):
+            groups_data[gid]["fresh_ok"] += 1
 
     group_stats: list[GroupStat] = []
     for gid in groups_order:
         d = groups_data[gid]
         t_cnt = d["total"]
         o_cnt = d["ok"]
+        f_cnt = d["fresh_ok"]
         rate = (o_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
         group_stats.append(
             GroupStat(
@@ -154,8 +159,16 @@ def compute_summary_stats(servers: list[Server]) -> SummaryStats:
                 ok_count=o_cnt,
                 total_count=t_cnt,
                 success_rate=rate,
+                fresh_ok_count=f_cnt,
             )
         )
+
+    # Сортировка подписок: по количеству выявленных AGY-OK в текущей проверке (без кэша),
+    # затем по общему числу OK и проценту успеха
+    group_stats.sort(
+        key=lambda g: (g.fresh_ok_count, g.ok_count, g.success_rate),
+        reverse=True,
+    )
 
     # 5. Причины сбоев (для серверов с неуспешным результатом)
     failed_servers = [s for s in servers if s.result in (RESULT_DEAD, RESULT_BLOCK)]

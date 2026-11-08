@@ -167,6 +167,7 @@ class Server:
     ingress_country_code: str = ""
     ingress_ip: str = ""
     antidpi_strategy: int | None = None
+    from_cache: bool = False
     _config_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _endpoint_identity: str | None = dataclasses.field(default=None, repr=False, compare=False)
     _cache_key: str | None = dataclasses.field(default=None, repr=False, compare=False)

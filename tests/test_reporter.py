@@ -261,7 +261,9 @@ def test_write_import_file_scoring_and_degraded_retention(tmp_path: Path) -> Non
         latency_ms=0,
     )
 
-    sb_cnt, xr_cnt = write_import_file(None, import_file, fallback_servers=[s_degraded, s_mid, s_top, s_dead])
+    sb_cnt, xr_cnt = write_import_file(
+        None, import_file, fallback_servers=[s_degraded, s_mid, s_top, s_dead]
+    )
     assert sb_cnt == 3
     assert xr_cnt == 0
 

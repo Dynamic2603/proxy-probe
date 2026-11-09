@@ -259,32 +259,32 @@ def test_resolve_lifecycle() -> None:
     from proxy_probe.models import RESULT_BLOCK, RESULT_DEAD, RESULT_OK, STATE_ACTIVE, STATE_DEAD, STATE_DEGRADED
 
     # Первый успех
-    st, fails, oks = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_OK)
-    assert st == STATE_ACTIVE and fails == 0 and oks == 1
+    dec = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_OK)
+    assert dec.state == STATE_ACTIVE and dec.consecutive_fails == 0 and dec.ok_count == 1
 
     # Первый сбой по сети для ранее работавшего узла -> переходит в DEGRADED (1/3)
-    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=0, probe_result=RESULT_DEAD)
-    assert st == STATE_DEGRADED and fails == 1 and oks == 1
+    dec = resolve_lifecycle(ok_count=1, consecutive_fails=0, probe_result=RESULT_DEAD)
+    assert dec.state == STATE_DEGRADED and dec.consecutive_fails == 1 and dec.ok_count == 1
 
     # Второй сбой подряд по сети -> остается в DEGRADED (2/3)
-    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=1, probe_result=RESULT_DEAD)
-    assert st == STATE_DEGRADED and fails == 2 and oks == 1
+    dec = resolve_lifecycle(ok_count=1, consecutive_fails=1, probe_result=RESULT_DEAD)
+    assert dec.state == STATE_DEGRADED and dec.consecutive_fails == 2 and dec.ok_count == 1
 
     # Геоблок (RESULT_BLOCK) -> терминальный сбой, СРАЗУ DEAD без Grace Period!
-    st, fails, oks = resolve_lifecycle(ok_count=5, consecutive_fails=0, probe_result=RESULT_BLOCK)
-    assert st == STATE_DEAD and fails == 3 and oks == 0
+    dec = resolve_lifecycle(ok_count=5, consecutive_fails=0, probe_result=RESULT_BLOCK)
+    assert dec.state == STATE_DEAD and dec.consecutive_fails == 3 and dec.ok_count == 0
 
     # Третий сбой подряд по сети -> исчерпание лимита, переходит в DEAD (3/3)
-    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_DEAD)
-    assert st == STATE_DEAD and fails == 3 and oks == 1
+    dec = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_DEAD)
+    assert dec.state == STATE_DEAD and dec.consecutive_fails == 3 and dec.ok_count == 1
 
     # Реабилитация из DEGRADED при успехе -> сброс сбоев в 0, возврат в ACTIVE
-    st, fails, oks = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_OK)
-    assert st == STATE_ACTIVE and fails == 0 and oks == 2
+    dec = resolve_lifecycle(ok_count=1, consecutive_fails=2, probe_result=RESULT_OK)
+    assert dec.state == STATE_ACTIVE and dec.consecutive_fails == 0 and dec.ok_count == 2
 
     # Узел, который никогда не работал (ok_count=0), при первом же сбое сразу DEAD
-    st, fails, oks = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_DEAD)
-    assert st == STATE_DEAD and fails == 1 and oks == 0
+    dec = resolve_lifecycle(ok_count=0, consecutive_fails=0, probe_result=RESULT_DEAD)
+    assert dec.state == STATE_DEAD and dec.consecutive_fails == 1 and dec.ok_count == 0
 
 
 def test_cache_grace_period_and_scoring_lifecycle(tmp_path: Path) -> None:
@@ -423,5 +423,43 @@ def test_result_cache_clear_dead(tmp_path: Path) -> None:
     assert len(reloaded.entries) == 2
     assert "ok1" in reloaded.entries
     assert "block1" in reloaded.entries
+
+
+def test_cache_antidpi_strategy_cleared_on_direct_ok(tmp_path: Path) -> None:
+    from proxy_probe.models import STATE_ACTIVE, STATE_DEGRADED
+
+    cache_file = tmp_path / "antidpi_reset.json"
+    cache = ResultCache(path=cache_file, ttl_map={RESULT_OK: 3600, RESULT_DEAD: 1800})
+
+    s = Server(
+        group_id=1,
+        group_name="G",
+        name="srv",
+        engine="sing-box",
+        server="1.2.3.4",
+        server_port=443,
+        import_obj={"type": "vless", "server": "1.2.3.4", "server_port": 443},
+        source="fresh",
+    )
+
+    # 1. Спасение через Stage 2 (antidpi_strategy = 15)
+    s.result = RESULT_OK
+    s.antidpi_strategy = 15
+    cache.update_from_server(s)
+    assert cache.entries[s.cache_key]["antidpi_strategy"] == 15
+
+    # 2. Временный сбой (DEGRADED) сохраняет последнюю рабочую стратегию 15
+    s.result = RESULT_DEAD
+    s.antidpi_strategy = None
+    cache.update_from_server(s)
+    assert cache.entries[s.cache_key]["state"] == STATE_DEGRADED
+    assert cache.entries[s.cache_key]["antidpi_strategy"] == 15
+
+    # 3. Прямой успех в Stage 1 (antidpi_strategy = None) обязан сбросить стратегию в None
+    s.result = RESULT_OK
+    s.antidpi_strategy = None
+    cache.update_from_server(s)
+    assert cache.entries[s.cache_key]["state"] == STATE_ACTIVE
+    assert cache.entries[s.cache_key]["antidpi_strategy"] is None
 
 

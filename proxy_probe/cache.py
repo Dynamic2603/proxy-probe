@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from .models import (
     TERMINAL_FAILURES,
     Server,
 )
+from .parsers import extract_host_port
 
 CACHE_VERSION = 1
 DEFAULT_CACHE_NAME = "results.json"
@@ -38,30 +40,37 @@ def calculate_score(
     return max(1, min(100, score))
 
 
+@dataclass(frozen=True, slots=True)
+class LifecycleDecision:
+    state: str
+    consecutive_fails: int
+    ok_count: int
+
+
 def resolve_lifecycle(
     ok_count: int,
     consecutive_fails: int,
     probe_result: str,
-) -> tuple[str, int, int]:
-    """Определяет (new_state, new_consecutive_fails, new_ok_count).
+) -> LifecycleDecision:
+    """Определяет решение жизненного цикла (state, consecutive_fails, ok_count).
 
     OCP: Терминальные сбои (AGY-BLOCK / геоблок Google) мгновенно переводят узел
     в STATE_DEAD без испытательного срока.
     Транзиентные сбои (DEAD / таймаут сети) сохраняют Grace Period (DEGRADED).
     """
     if probe_result == RESULT_OK:
-        return STATE_ACTIVE, 0, ok_count + 1
+        return LifecycleDecision(state=STATE_ACTIVE, consecutive_fails=0, ok_count=ok_count + 1)
 
     # Терминальный сбой: геоблок — это свойство IP/подсети в Google, не деградирует
     if probe_result in TERMINAL_FAILURES:
-        return STATE_DEAD, MAX_CONSECUTIVE_FAILS, 0
+        return LifecycleDecision(state=STATE_DEAD, consecutive_fails=MAX_CONSECUTIVE_FAILS, ok_count=0)
 
     # Сетевой транзиентный сбой (DEAD / таймаут / connection reset)
     new_fails = consecutive_fails + 1
     if ok_count >= 1 and new_fails < MAX_CONSECUTIVE_FAILS:
-        return STATE_DEGRADED, new_fails, ok_count
+        return LifecycleDecision(state=STATE_DEGRADED, consecutive_fails=new_fails, ok_count=ok_count)
 
-    return STATE_DEAD, new_fails, ok_count
+    return LifecycleDecision(state=STATE_DEAD, consecutive_fails=new_fails, ok_count=ok_count)
 
 
 def _normalize_entry(rec: dict) -> dict:
@@ -87,6 +96,50 @@ def _normalize_entry(rec: dict) -> dict:
         rec["consecutive_fails"] = MAX_CONSECUTIVE_FAILS
 
     return rec
+
+
+def server_from_cache_entry(
+    entry: dict[str, Any],
+    *,
+    require_endpoint: bool = False,
+) -> Server | None:
+    """Восстанавливает объект Server из записи кэша results.json (SSOT)."""
+    raw_obj = entry.get("import_obj")
+    if not isinstance(raw_obj, dict):
+        return None
+    host, port = extract_host_port(raw_obj)
+    if require_endpoint and (not host or not port):
+        return None
+    eng = str(entry.get("engine") or "")
+    if not eng:
+        eng = "xray" if raw_obj.get("protocol") else "sing-box"
+    res = str(entry.get("result", ""))
+    state = str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED))
+    strat = entry.get("antidpi_strategy")
+    strat_val: int | None = int(strat) if strat and int(strat) > 0 else None
+    return Server(
+        group_id=0,
+        group_name="",
+        name=str(raw_obj.get("tag", "")),
+        engine=eng,
+        server=host,
+        server_port=port,
+        import_obj=raw_obj,
+        source="cache",
+        result=res,
+        country=str(entry.get("country", "")),
+        ip_out=str(entry.get("ip_out", "")),
+        country_code=str(entry.get("country_code", "")),
+        city=str(entry.get("city", "")),
+        org=str(entry.get("org", "")),
+        ingress_country_code=str(entry.get("ingress_country_code", "")),
+        ingress_ip=str(entry.get("ingress_ip", "")),
+        antidpi_strategy=strat_val,
+        score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
+        state=state,
+        consecutive_fails=int(entry.get("consecutive_fails", 0)),
+        note=str(entry.get("note") or ""),
+    )
 
 
 def default_cache_path() -> Path:
@@ -190,11 +243,14 @@ class ResultCache:
         cur_check_count = int(cur.get("check_count", 0)) + 1
         cur_fails = int(cur.get("consecutive_fails", 0))
 
-        new_state, new_fails, new_ok_count = resolve_lifecycle(
+        decision = resolve_lifecycle(
             ok_count=cur_ok_count,
             consecutive_fails=cur_fails,
             probe_result=server.result,
         )
+        new_state = decision.state
+        new_fails = decision.consecutive_fails
+        new_ok_count = decision.ok_count
         new_score = calculate_score(
             ok_count=new_ok_count,
             consecutive_fails=new_fails,
@@ -207,6 +263,15 @@ class ResultCache:
         server.state = new_state
         server.score = new_score
         server.consecutive_fails = new_fails
+
+        if server.result == RESULT_OK:
+            effective_strategy = server.antidpi_strategy
+        elif new_state == STATE_DEGRADED:
+            effective_strategy = (
+                server.antidpi_strategy if server.antidpi_strategy is not None else cur.get("antidpi_strategy")
+            )
+        else:
+            effective_strategy = None
 
         rec: dict = {
             "checked": now_s,
@@ -221,9 +286,7 @@ class ResultCache:
             "web_status": server.web_status or cur.get("web_status", ""),
             "ingress_country_code": server.ingress_country_code or cur.get("ingress_country_code", ""),
             "ingress_ip": server.ingress_ip or cur.get("ingress_ip", ""),
-            "antidpi_strategy": (
-                server.antidpi_strategy if server.antidpi_strategy is not None else cur.get("antidpi_strategy")
-            ),
+            "antidpi_strategy": effective_strategy,
             "state": new_state,
             "score": new_score,
             "consecutive_fails": new_fails,

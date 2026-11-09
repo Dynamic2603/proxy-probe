@@ -16,7 +16,6 @@ from proxy_probe.ui import (
     format_latency,
     format_live_counters,
     format_result,
-    print_progress_row,
     print_results_table,
     print_summary_panel,
 )
@@ -71,26 +70,6 @@ def test_format_live_counters() -> None:
     # Missing keys default to 0
     res_partial = format_live_counters({RESULT_OK: 10})
     assert res_partial == "AGY-OK: 10 | AGY-BLOCK: 0 | DEAD: 0 | UNKNOWN: 0"
-
-
-def test_print_progress_row_write_fn() -> None:
-    server = Server(
-        group_id=1,
-        group_name="Default",
-        name="TestServer",
-        engine="sing-box",
-        server="127.0.0.1",
-        server_port=8080,
-        import_obj={},
-        source="fresh",
-        result=RESULT_OK,
-        latency_ms=120,
-    )
-    written: list[str] = []
-    print_progress_row(server, 1, 10, write_fn=written.append)
-    assert len(written) == 1
-    assert "127.0.0.1:8080" in written[0]
-    assert "AGY-OK" in written[0]
 
 
 def test_print_results_table_mode_none() -> None:

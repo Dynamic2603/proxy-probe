@@ -7,6 +7,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .isp import IspIdentity
 
+_MARKETING_PREFIXES = ("Golden / ", "Silver / ", "Golden /", "Silver /")
+
+
+def clean_family_name(raw_name: str) -> str:
+    """Очищает название семейства от внешних маркетинговых префиксов ('Golden /', 'Silver /')."""
+    cleaned = raw_name
+    for prefix in _MARKETING_PREFIXES:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix) :].strip()
+    return cleaned or raw_name
+
 
 @dataclasses.dataclass(frozen=True)
 class StrategyProfile:
@@ -25,11 +36,7 @@ class StrategyProfile:
     @property
     def technical_family(self) -> str:
         """Очищенное от внешних ярлыков ('Golden /', 'Silver /') название механики десинхронизации."""
-        cleaned = self.family_name
-        for prefix in ("Golden / ", "Silver / ", "Golden /", "Silver /"):
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix) :].strip()
-        return cleaned or self.family_name
+        return clean_family_name(self.family_name)
 
     @property
     def short_tag(self) -> str:
@@ -43,40 +50,36 @@ class CalibrationLevelConfig:
 
     level: int
     title: str
-    cmd_file: str
-    server_limit: int  # 15 для экспресс-теста, 0 (все живые) для широкого
+    server_limit: int  # 15 для экспресс-теста, 100 для широкого
     strategy_mode: str  # "diversity", "top_living", "all"
     timeout: float
-    next_cmd_file: str | None
+    next_level: int | None
 
 
 CALIBRATION_LEVELS: dict[int, CalibrationLevelConfig] = {
     2: CalibrationLevelConfig(
         level=2,
         title="Уровень 2: Экспресс-калибровка разнообразия механик",
-        cmd_file="calibrate_level2.cmd",
         server_limit=15,
         strategy_mode="diversity",
         timeout=1.8,
-        next_cmd_file="calibrate_level3.cmd",
+        next_level=3,
     ),
     3: CalibrationLevelConfig(
         level=3,
         title="Уровень 3: Расширенная калибровка на пуле живых серверов",
-        cmd_file="calibrate_level3.cmd",
         server_limit=100,
         strategy_mode="top_living",
         timeout=2.5,
-        next_cmd_file="calibrate_level4.cmd",
+        next_level=4,
     ),
     4: CalibrationLevelConfig(
         level=4,
         title="Уровень 4: Глубокий перебор всех 484 стратегий каталога",
-        cmd_file="calibrate_level4.cmd",
         server_limit=15,
         strategy_mode="all",
         timeout=1.8,
-        next_cmd_file=None,
+        next_level=None,
     ),
 }
 
@@ -102,11 +105,7 @@ class StrategyRating:
     @property
     def technical_family(self) -> str:
         """Очищенное название механики десинхронизации."""
-        cleaned = self.family_name
-        for prefix in ("Golden / ", "Silver / ", "Golden /", "Silver /"):
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix) :].strip()
-        return cleaned or self.family_name
+        return clean_family_name(self.family_name)
 
     @property
     def status_badge(self) -> str:

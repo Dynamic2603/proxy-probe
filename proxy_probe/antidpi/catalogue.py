@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 
 from ..engines import project_root
-from .models import StrategyProfile
+from .models import StrategyProfile, clean_family_name
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,7 @@ def parse_catalogue_data(data: dict) -> list[StrategyProfile]:
         fam_info = families_by_id.get(fam_id, {})
         fam_name = str(fam_info.get("Name", f"Family {fam_id}"))
 
-        # Очищаем название семейства от сторонних маркетинговых префиксов ("Golden /", "Silver /")
-        clean_fam = fam_name
-        for prefix in ("Golden / ", "Silver / ", "Golden /", "Silver /"):
-            if clean_fam.startswith(prefix):
-                clean_fam = clean_fam[len(prefix) :].strip()
+        clean_fam = clean_family_name(fam_name)
 
         raw_args = row.get("Args", [])
         args = tuple(str(a) for a in raw_args) if isinstance(raw_args, list) else ()

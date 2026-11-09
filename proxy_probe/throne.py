@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .engines import DEFAULT_SINGBOX_VERSION, DEFAULT_XRAY_VERSION, app_bin_dir
 from .models import Server
 from .parsers import extract_host_port, extract_proxy_outbounds_from_config, extract_tag
 
@@ -60,10 +61,6 @@ def default_throne_dir() -> Path:
     return find_throne_dir()
 
 
-DEFAULT_SINGBOX_VERSION = "1.14.1"
-DEFAULT_XRAY_VERSION = "26.9.9"
-
-
 def detect_throne_versions(throne_dir: Path) -> tuple[str, str]:
     exe = throne_dir / "ThroneCore.exe"
     if exe.exists():
@@ -78,8 +75,6 @@ def detect_throne_versions(throne_dir: Path) -> tuple[str, str]:
             pass
 
     # Fallback к локальному манифесту бинарников или версиям по умолчанию
-    from .engines import app_bin_dir
-
     manifest = app_bin_dir() / "current.json"
     if manifest.is_file():
         try:

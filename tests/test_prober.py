@@ -117,7 +117,7 @@ def test_agy_probe_with_stop_event() -> None:
     assert out == ""
 
 
-def test_run_probe_with_stop_event(tmp_path: prober.Path) -> None:
+def test_run_probe_with_stop_event() -> None:
     import threading
 
     stop_event = threading.Event()
@@ -128,7 +128,6 @@ def test_run_probe_with_stop_event(tmp_path: prober.Path) -> None:
         False,
         {"type": "direct"},
         21999,
-        tmp_path,
         {"start": 5.0, "probe": 5.0},
         stop_event=stop_event,
     )
@@ -196,7 +195,9 @@ def test_probe_tcp_port_refused() -> None:
 
 
 def test_probe_tcp_port_dns_error() -> None:
-    is_alive, _lat, note = prober.probe_tcp_port("invalid-domain-never-exists-1234567.invalid", 443, timeout=0.5)
+    is_alive, _lat, note = prober.probe_tcp_port(
+        "invalid-domain-never-exists-1234567.invalid", 443, timeout=0.5
+    )
     assert is_alive is False
     assert "tcp:" in note
 

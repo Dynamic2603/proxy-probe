@@ -137,16 +137,14 @@ def test_run_probe_skips_agy_when_circuit_breaker_tripped() -> None:
         mock_proc.poll.return_value = None
         mock_popen.return_value = mock_proc
 
-        with tempfile.TemporaryDirectory() as td:
-            res = run_probe(
-                engine_bin="sb.exe",
-                is_xray=False,
-                import_obj={},
-                port=12345,
-                run_root=Path(td),
-                timeouts={},
-                circuit_breaker=cb,
-            )
+        res = run_probe(
+            engine_bin="sb.exe",
+            is_xray=False,
+            import_obj={},
+            port=12345,
+            timeouts={},
+            circuit_breaker=cb,
+        )
 
         # agy_probe вообще не должен вызываться
         mock_agy.assert_not_called()
@@ -172,16 +170,14 @@ def test_run_probe_trips_circuit_breaker_on_quota_error() -> None:
         mock_proc.poll.return_value = None
         mock_popen.return_value = mock_proc
 
-        with tempfile.TemporaryDirectory() as td:
-            res = run_probe(
-                engine_bin="sb.exe",
-                is_xray=False,
-                import_obj={},
-                port=12346,
-                run_root=Path(td),
-                timeouts={},
-                circuit_breaker=cb,
-            )
+        res = run_probe(
+            engine_bin="sb.exe",
+            is_xray=False,
+            import_obj={},
+            port=12346,
+            timeouts={},
+            circuit_breaker=cb,
+        )
 
         assert cb.is_tripped is True
         assert "лимит квоты agy" in cb.reason

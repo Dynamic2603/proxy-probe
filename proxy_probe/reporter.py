@@ -7,21 +7,18 @@ import shutil
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from .antidpi.benchmark import apply_relay_detour, build_relay_outbound
+from .antidpi.relay import DEFAULT_RELAY_PORT
+from .cache import ResultCache, server_from_cache_entry
 from .engines import singbox_to_xray_outbound
 from .models import (
-    RESULT_OK,
-    STATE_ACTIVE,
     STATE_DEGRADED,
     Server,
     format_score_display,
     is_exportable,
 )
 from .stats import SummaryStats, compute_summary_stats
-
-if TYPE_CHECKING:
-    from .cache import ResultCache
 
 
 def write_report(
@@ -143,6 +140,7 @@ def write_import_file(
     cache: ResultCache | None,
     path: Path,
     fallback_servers: list[Server] | None = None,
+    relay_port: int = DEFAULT_RELAY_PORT,
 ) -> tuple[int, int]:
     sb: list[dict] = []
     xr: list[dict] = []
@@ -165,93 +163,37 @@ def write_import_file(
         for entry_key, entry in cache.entries.items():
             state = str(entry.get("state", ""))
             res = str(entry.get("result", ""))
-            if not is_exportable(res, state):
+            if not is_exportable(res, state) or not cache.is_valid(entry_key):
                 continue
-            if not cache.is_valid(entry_key):
-                continue
-            raw_obj = entry.get("import_obj")
-            if not isinstance(raw_obj, dict):
-                continue
-
-            host = str(raw_obj.get("server") or "")
-            port = int(raw_obj.get("server_port") or 0)
-            if not host:
-                sett = raw_obj.get("settings")
-                if isinstance(sett, dict):
-                    host = str(sett.get("address") or "")
-                    port = int(sett.get("port") or 0)
-
-            eng = str(entry.get("engine") or "")
-            if not eng:
-                eng = "xray" if raw_obj.get("protocol") else "sing-box"
-
-            strat = entry.get("antidpi_strategy")
-            strat_val: int | None = int(strat) if strat and int(strat) > 0 else None
-            # Сервер идет через Zapret только если стратегия > 0 и узел не работает напрямую
-            if entry.get("direct_result") == RESULT_OK:
-                strat_val = None
-
-            s = Server(
-                group_id=0,
-                group_name="",
-                name=str(raw_obj.get("tag", "")),
-                engine=eng,
-                server=host,
-                server_port=port,
-                import_obj=raw_obj,
-                source="cache",
-                result=res,
-                country=str(entry.get("country", "")),
-                ip_out=str(entry.get("ip_out", "")),
-                country_code=str(entry.get("country_code", "")),
-                city=str(entry.get("city", "")),
-                org=str(entry.get("org", "")),
-                ingress_country_code=str(entry.get("ingress_country_code", "")),
-                ingress_ip=str(entry.get("ingress_ip", "")),
-                antidpi_strategy=strat_val,
-                score=int(entry.get("score", 70 if res == RESULT_OK else 0)),
-                state=str(entry.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEGRADED)),
-                consecutive_fails=int(entry.get("consecutive_fails", 0)),
-            )
-            candidates.append(s)
+            cached_srv = server_from_cache_entry(entry)
+            if cached_srv is not None:
+                candidates.append(cached_srv)
 
     # Дедупликация по сервисному эндпоинту: 1 лучший профиль на узел
     ok_servers = deduplicate_by_endpoint(candidates)
-
-    ok_servers.sort(
-        key=lambda s: (
-            0 if s.state == STATE_ACTIVE else 1,
-            -s.score,
-            s.latency_ms if s.latency_ms > 0 else 99999,
-            -s.export_rank[4],  # fp_rank descending
-            s.index,
-        )
-    )
+    ok_servers.sort(key=lambda s: s.export_rank, reverse=True)
 
     has_zapret_sb = False
     has_zapret_xr = False
 
     for s in ok_servers:
         prepared = _prepare_obj(s)
-        is_xray = s.engine == "xray" or (not s.engine and s.import_obj.get("protocol"))
+        is_xray = bool(s.engine == "xray" or (not s.engine and s.import_obj.get("protocol")))
         is_zapret = bool(s.antidpi_strategy and s.antidpi_strategy > 0 and s.is_tcp_protocol)
 
         if is_zapret:
             # Для узлов sing-box, требующих Zapret, конвертируем в Xray:
-            # Throne блокирует detour в sing-box подписках, но полностью поддерживает dialerProxy в Xray (Вариант 2)
+            # Throne блокирует detour в sing-box подписках, но полностью поддерживает dialerProxy в Xray
             if not is_xray:
                 converted = singbox_to_xray_outbound(prepared)
                 if "protocol" in converted:
                     prepared = converted
                     is_xray = True
 
+            prepared = apply_relay_detour(prepared, is_xray=is_xray)
             if is_xray:
-                ss = prepared.setdefault("streamSettings", {})
-                sockopt = ss.setdefault("sockopt", {})
-                sockopt["dialerProxy"] = "zapret-relay"
                 has_zapret_xr = True
             else:
-                prepared["detour"] = "zapret-relay"
                 has_zapret_sb = True
         else:
             # Прямые серверы никогда не должны содержать detour / dialerProxy
@@ -268,20 +210,9 @@ def write_import_file(
             sb.append(prepared)
 
     if has_zapret_sb:
-        sb.append({
-            "type": "socks",
-            "tag": "zapret-relay",
-            "server": "127.0.0.1",
-            "server_port": 10850,
-        })
+        sb.append(build_relay_outbound(is_xray=False, relay_port=relay_port))
     if has_zapret_xr:
-        xr.append({
-            "protocol": "socks",
-            "tag": "zapret-relay",
-            "settings": {
-                "servers": [{"address": "127.0.0.1", "port": 10850}]
-            },
-        })
+        xr.append(build_relay_outbound(is_xray=True, relay_port=relay_port))
 
     if path.exists() and path.stat().st_size > 0:
         try:

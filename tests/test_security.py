@@ -261,13 +261,17 @@ def test_gather_sources_with_filtering(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # 1. Группа без remove_insecure, filter_insecure=None -> оба сервера загружаются
     groups_no_filter = [{"id": 1, "name": "G1", "url": "http://example.com/sub", "remove_insecure": False}]
-    servers, warnings = gather_sources(groups_no_filter, selected={1}, no_fetch=False, prefetched=prefetched)
+    servers, warnings = gather_sources(
+        groups_no_filter, selected={1}, no_fetch=False, prefetched=prefetched
+    )
     assert len(servers) == 2
     assert len(warnings) == 0
 
     # 2. Группа с remove_insecure=True -> небезопасный отфильтровывается
     groups_with_filter = [{"id": 2, "name": "G2", "url": "http://example.com/sub", "remove_insecure": True}]
-    servers, warnings = gather_sources(groups_with_filter, selected={2}, no_fetch=False, prefetched=prefetched)
+    servers, warnings = gather_sources(
+        groups_with_filter, selected={2}, no_fetch=False, prefetched=prefetched
+    )
     assert len(servers) == 1
     assert servers[0].name == "Safe1"
     assert any("Отфильтровано 1 небезопасных" in w for w in warnings)

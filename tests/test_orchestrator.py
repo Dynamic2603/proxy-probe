@@ -57,16 +57,6 @@ def test_dedupe_servers_alpn_order() -> None:
     assert len(deduped) == 1
 
 
-def test_canonical_structure_mixed_types() -> None:
-    from proxy_probe.orchestrator import _canonical_structure
-
-    # Смешанный список разных примитивных типов не должен падать с TypeError
-    mixed = [1, "b", 2, "a", True]
-    canonical = _canonical_structure(mixed)
-    assert len(canonical) == 5
-    assert set(canonical) == {1, "b", 2, "a"}
-
-
 def test_gather_sources_with_prefetched(monkeypatch) -> None:
     # Интеграционный тест: проверяет сквозную цепочку gather_sources -> parse_subscription -> parse_vless
     monkeypatch.setattr("proxy_probe.orchestrator.read_profiles_for_group", lambda gid, gname="": [])

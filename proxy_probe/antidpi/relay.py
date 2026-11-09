@@ -4,13 +4,12 @@ import atexit
 import contextlib
 import json
 import logging
-import os
 import socket
 import subprocess
 import time
 from pathlib import Path
 
-from ..engines import app_bin_dir
+from ..engines import app_bin_dir, clean_proxy_env
 
 logger = logging.getLogger(__name__)
 
@@ -107,18 +106,12 @@ class ZapretRelay:
         cfg_bytes = json.dumps(cfg, ensure_ascii=False).encode("utf-8")
 
         cmd = [bin_path, "run", "-c", "stdin"]
-        clean_env = {
-            k: v
-            for k, v in os.environ.items()
-            if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-        }
-
         self.process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=clean_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=clean_proxy_env(),
         )
         _ACTIVE_RELAYS.add(self)
 
@@ -127,11 +120,8 @@ class ZapretRelay:
             self.process.stdin.close()
 
         if not wait_for_port(self.port, self.host, timeout=3.0):
-            out = ""
-            if self.process.stdout:
-                out = self.process.stdout.read().decode("utf-8", errors="replace")
             self.stop()
-            raise RuntimeError(f"Релей sing-box не смог открыться на {self.host}:{self.port}. Вывод: {out.strip()}")
+            raise RuntimeError(f"Релей sing-box не смог открыться на {self.host}:{self.port}.")
 
         logger.info("Локальный Zapret-релей успешно запущен на %s:%d", self.host, self.port)
 
@@ -157,5 +147,5 @@ class ZapretRelay:
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.stop()

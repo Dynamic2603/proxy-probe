@@ -52,7 +52,7 @@ ignore = ["RUF001", "RUF002", "RUF003", "SIM115"]
 exclude = [".venv"]
 ignore_names = ["group_id", "row_factory", "return_value", "side_effect", "redirect_request"]
 min_confidence = 60
-paths = ["proxy_probe", "tests"]
+paths = ["proxy_probe", "tests", "vulture_whitelist.py"]
 
 [tool.mypy]
 python_version = "3.11"

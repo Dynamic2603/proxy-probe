@@ -3,26 +3,51 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import re
+from enum import StrEnum
 from typing import Any
 
-RESULT_OK = "AGY-OK"
-RESULT_BLOCK = "AGY-BLOCK"
-RESULT_DEAD = "DEAD"
-RESULT_UNKNOWN = "UNKNOWN"
+
+class ProbeResult(StrEnum):
+    OK = "AGY-OK"
+    BLOCK = "AGY-BLOCK"
+    DEAD = "DEAD"
+    UNKNOWN = "UNKNOWN"
+
+
+class LifecycleState(StrEnum):
+    ACTIVE = "ACTIVE"
+    DEGRADED = "DEGRADED"
+    DEAD = "DEAD"
+
+
+class WebStatus(StrEnum):
+    OK = "ok"
+    CAPTCHA = "captcha"
+    BLOCKED = "blocked"
+
+
+class EngineType(StrEnum):
+    SINGBOX = "sing-box"
+    XRAY = "xray"
+
+
+RESULT_OK: str = ProbeResult.OK
+RESULT_BLOCK: str = ProbeResult.BLOCK
+RESULT_DEAD: str = ProbeResult.DEAD
+RESULT_UNKNOWN: str = ProbeResult.UNKNOWN
 
 GEO_PRECHECK_URL = "https://aistudio.google.com"
 WEB_CHECK_URL = "https://gemini.google.com"
-WEB_STATUS_OK = "ok"
-WEB_STATUS_CAPTCHA = "captcha"
-WEB_STATUS_BLOCKED = "blocked"
+WEB_STATUS_OK: str = WebStatus.OK
+WEB_STATUS_CAPTCHA: str = WebStatus.CAPTCHA
+WEB_STATUS_BLOCKED: str = WebStatus.BLOCKED
 
-STATE_ACTIVE = "ACTIVE"
-STATE_DEGRADED = "DEGRADED"
-STATE_DEAD = "DEAD"
+STATE_ACTIVE: str = LifecycleState.ACTIVE
+STATE_DEGRADED: str = LifecycleState.DEGRADED
+STATE_DEAD: str = LifecycleState.DEAD
 MAX_CONSECUTIVE_FAILS = 3
 
 TERMINAL_FAILURES = {RESULT_BLOCK}
-TRANSIENT_FAILURES = {RESULT_DEAD, RESULT_UNKNOWN}
 
 
 def is_exportable(result: str, state: str) -> bool:
@@ -131,14 +156,60 @@ def country_code_to_emoji(code: str) -> str:
     """Преобразует 2-буквенный ISO код страны (напр. 'DE') в флаг emoji (🇩🇪)."""
     code = (code or "").strip().upper()
     if len(code) == 2 and code.isalpha():
-        return chr(ord(code[0]) - ord("A") + 0x1F1E6) + chr(ord(code[1]) - ord("A") + 0x1F1E6)
+        return "".join(chr(ord(ch) - ord("A") + 0x1F1E6) for ch in code)
     return ""
+
+
+def first_dict(items: Any) -> dict[str, Any] | None:
+    """Возвращает первый элемент списка, являющийся словарём, или None."""
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                return item
+    return None
 
 
 def normalize_org_name(org: str) -> str:
     """Нормализует пробелы в названии организации/провайдера."""
     raw = str(org or "").strip()
     return " ".join(raw.split()) if raw else ""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ConfigParts:
+    proto: str
+    host: str
+    port: str
+    cred: str
+    sni: str
+    reality_pk: str
+    fp: str
+    flow: str
+    alpn_str: str
+    path: str
+
+    def as_config_identity(self) -> str:
+        return (
+            f"{self.proto}:{self.host}:{self.port}:{self.cred}:{self.sni}:"
+            f"{self.reality_pk}:{self.fp}:{self.flow}:{self.alpn_str}:{self.path}"
+        )
+
+    def as_endpoint_identity(self) -> str:
+        return (
+            f"{self.proto}:{self.host}:{self.port}:{self.cred}:{self.sni}:"
+            f"{self.reality_pk}:{self.flow}:{self.alpn_str}:{self.path}"
+        )
+
+
+@dataclasses.dataclass(frozen=True, order=True, slots=True)
+class ExportRank:
+    state_weight: int
+    direct_weight: int
+    score: int
+    lat_weight: int
+    source_weight: int
+    fp_rank: int
+    neg_index: int
 
 
 @dataclasses.dataclass
@@ -316,14 +387,21 @@ class Server:
 
         return head
 
-    def _parse_config_parts(self) -> tuple[str, str, str, str, str, str, str, str, str, str]:
-        """Парсит нормализованные компоненты конфигурации (SSOT).
-
-        Возвращает:
-        (proto, host, port, cred, sni, reality_pk, fp, flow, alpn_str, path)
-        """
+    def _parse_config_parts(self) -> ConfigParts:
+        """Парсит нормализованные компоненты конфигурации (SSOT)."""
         if not self.import_obj or not isinstance(self.import_obj, dict):
-            return ("unknown", str(self.server), str(self.server_port), "", "", "", "", "", "", "")
+            return ConfigParts(
+                proto="unknown",
+                host=str(self.server),
+                port=str(self.server_port),
+                cred="",
+                sni="",
+                reality_pk="",
+                fp="",
+                flow="",
+                alpn_str="",
+                path="",
+            )
 
         obj = self.import_obj
         proto = str(obj.get("type") or obj.get("protocol") or "").strip().lower()
@@ -331,18 +409,11 @@ class Server:
         raw_settings = obj.get("settings")
         s: dict[str, Any] = raw_settings if isinstance(raw_settings, dict) else {}
         user_obj: dict[str, Any] = {}
-        vnext = s.get("vnext")
-        if isinstance(vnext, list) and vnext and isinstance(vnext[0], dict):
-            users = vnext[0].get("users")
-            if isinstance(users, list) and users and isinstance(users[0], dict):
-                user_obj = users[0]
-        elif (
-            (servers_list := s.get("servers"))
-            and isinstance(servers_list, list)
-            and servers_list
-            and isinstance(servers_list[0], dict)
-        ):
-            user_obj = servers_list[0]
+        if first_vnext := first_dict(s.get("vnext")):
+            if first_user := first_dict(first_vnext.get("users")):
+                user_obj = first_user
+        elif first_srv := first_dict(s.get("servers")):
+            user_obj = first_srv
 
         uuid = obj.get("uuid") or s.get("id") or user_obj.get("id") or user_obj.get("uuid")
 
@@ -401,7 +472,18 @@ class Server:
                     if p and not path:
                         path = str(p).strip()
 
-        return (proto, str(self.server), str(self.server_port), cred, sni, reality_pk, fp, flow, alpn_str, path)
+        return ConfigParts(
+            proto=proto,
+            host=str(self.server),
+            port=str(self.server_port),
+            cred=cred,
+            sni=sni,
+            reality_pk=reality_pk,
+            fp=fp,
+            flow=flow,
+            alpn_str=alpn_str,
+            path=path,
+        )
 
     @property
     def config_identity(self) -> str:
@@ -412,8 +494,7 @@ class Server:
         """
         if self._config_identity is not None:
             return self._config_identity
-        parts = self._parse_config_parts()
-        res = ":".join(parts)
+        res = self._parse_config_parts().as_config_identity()
         self._config_identity = res
         return res
 
@@ -426,13 +507,12 @@ class Server:
         """
         if self._endpoint_identity is not None:
             return self._endpoint_identity
-        proto, host, port, cred, sni, reality_pk, _fp, flow, alpn_str, path = self._parse_config_parts()
-        res = f"{proto}:{host}:{port}:{cred}:{sni}:{reality_pk}:{flow}:{alpn_str}:{path}"
+        res = self._parse_config_parts().as_endpoint_identity()
         self._endpoint_identity = res
         return res
 
     @property
-    def export_rank(self) -> tuple[int, int, int, int, int, int, int]:
+    def export_rank(self) -> ExportRank:
         """Критерий сравнительной ценности узла при экспорте в подписку (SSOT).
 
         Иерархия (от более важных к менее важным):
@@ -450,7 +530,15 @@ class Server:
         source_weight = 0 if self.source == "cache" else 1
         fp_name = (self.fingerprint or "").strip().lower()
         fp_rank = FINGERPRINT_PRIORITIES.get(fp_name, 1 if fp_name else 0)
-        return (state_weight, direct_weight, self.score, lat_weight, source_weight, fp_rank, -self.index)
+        return ExportRank(
+            state_weight=state_weight,
+            direct_weight=direct_weight,
+            score=self.score,
+            lat_weight=lat_weight,
+            source_weight=source_weight,
+            fp_rank=fp_rank,
+            neg_index=-self.index,
+        )
 
     @property
     def cache_key(self) -> str:

@@ -150,7 +150,10 @@ def test_cleanup_stale_windivert_service_stale_path_deletes_when_admin(tmp_path:
     expected_sys = tmp_path / "WinDivert64.sys"
     expected_sys.write_text("sys", encoding="utf-8")
 
-    qc_output = "[SC] QueryServiceConfig SUCCESS\n        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    qc_output = (
+        "[SC] QueryServiceConfig SUCCESS\n"
+        "        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    )
     with (
         patch("os.name", "nt"),
         patch("subprocess.run") as mock_run,
@@ -173,7 +176,10 @@ def test_cleanup_stale_windivert_service_stale_path_skips_when_not_admin(tmp_pat
     expected_sys = tmp_path / "WinDivert64.sys"
     expected_sys.write_text("sys", encoding="utf-8")
 
-    qc_output = "[SC] QueryServiceConfig SUCCESS\n        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    qc_output = (
+        "[SC] QueryServiceConfig SUCCESS\n"
+        "        BINARY_PATH_NAME   : C:\\Program Files\\OtherApp\\WinDivert64.sys\n"
+    )
     with (
         patch("os.name", "nt"),
         patch("subprocess.run") as mock_run,

@@ -282,7 +282,7 @@ def test_select_dead_servers_ranking() -> None:
 
 
 def test_collect_dead_candidates_from_cache(tmp_path: Path) -> None:
-    from proxy_probe.antidpi.__main__ import collect_dead_candidates
+    from proxy_probe.antidpi.runner import collect_dead_candidates
     from proxy_probe.cache import ResultCache
 
     c_file = tmp_path / "test_cache.json"

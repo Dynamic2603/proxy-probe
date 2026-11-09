@@ -5,9 +5,22 @@ import contextlib
 import json
 import re
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any
 
+from .models import first_dict
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedUri:
+    scheme: str
+    user: str
+    host: str
+    port: int
+    query: dict[str, str]
+    tag: str
 
 
 def _is_true(v: Any) -> bool:
@@ -18,7 +31,7 @@ def _clean_alpn(val: str) -> list[str]:
     return [a for a in val.split(",") if a] if val else []
 
 
-def _parse_uri(link: str) -> tuple[str, str, str, int, dict[str, str], str]:
+def _parse_uri(link: str) -> ParsedUri:
     """Надёжный парсер proxy URI (vless, trojan, hysteria2, shadowsocks).
 
     В отличие от стандартного urllib.parse.urlsplit, устойчив к:
@@ -28,13 +41,14 @@ def _parse_uri(link: str) -> tuple[str, str, str, int, dict[str, str], str]:
     - IPv6 адресам без квадратных скобок,
     - повреждённым URL-строкам.
     """
+    empty = ParsedUri(scheme="", user="", host="", port=0, query={}, tag="")
     try:
         raw = link.strip()
         raw, _, fragment = raw.partition("#")
         raw, _, query_str = raw.partition("?")
         scheme, sep, rest = raw.partition("://")
         if not sep:
-            return "", "", "", 0, {}, ""
+            return empty
 
         rest, _, path = rest.partition("/")
         user = ""
@@ -67,9 +81,9 @@ def _parse_uri(link: str) -> tuple[str, str, str, int, dict[str, str], str]:
         if path and not q.get("path"):
             q["path"] = "/" + path
         tag = urllib.parse.unquote(fragment)
-        return scheme.lower(), user, clean_host, port, q, tag
+        return ParsedUri(scheme=scheme.lower(), user=user, host=clean_host, port=port, query=q, tag=tag)
     except Exception:
-        return "", "", "", 0, {}, ""
+        return empty
 
 
 def _build_transport(net: str, q: dict[str, str]) -> dict[str, Any] | None:
@@ -120,7 +134,8 @@ def _singbox_tls(sec: str, host: str, q: dict[str, str]) -> dict[str, Any] | Non
 
 
 def parse_vless(link: str) -> tuple[str, dict]:
-    _, uuid, host, port, q, name = _parse_uri(link)
+    uri = _parse_uri(link)
+    uuid, host, port, q, name = uri.user, uri.host, uri.port, uri.query, uri.tag
     if not uuid or not host or not port:
         return "sing-box", {}
     net = q.get("type", "tcp")
@@ -185,7 +200,8 @@ def parse_vless(link: str) -> tuple[str, dict]:
 
 
 def parse_hysteria2(link: str) -> tuple[str, dict]:
-    _, passwd, host, port, q, name = _parse_uri(link)
+    uri = _parse_uri(link)
+    passwd, host, port, q, name = uri.user, uri.host, uri.port, uri.query, uri.tag
     if not host or not port:
         return "sing-box", {}
     out: dict[str, Any] = {
@@ -204,7 +220,8 @@ def parse_hysteria2(link: str) -> tuple[str, dict]:
 
 
 def parse_shadowsocks(link: str) -> tuple[str, dict]:
-    _, cred, host, port, _, name = _parse_uri(link)
+    uri = _parse_uri(link)
+    cred, host, port, name = uri.user, uri.host, uri.port, uri.tag
     method, password = "aes-128-gcm", ""
     if not port and host and not cred:
         pad = "=" * ((-len(host)) % 4)
@@ -251,7 +268,8 @@ def parse_shadowsocks(link: str) -> tuple[str, dict]:
 
 
 def parse_trojan(link: str) -> tuple[str, dict]:
-    _, passwd, host, port, q, name = _parse_uri(link)
+    uri = _parse_uri(link)
+    passwd, host, port, q, name = uri.user, uri.host, uri.port, uri.query, uri.tag
     if not host or not port:
         return "sing-box", {}
     return "sing-box", {
@@ -453,28 +471,15 @@ def extract_host_port(obj: dict) -> tuple[str, int]:
     sett_dict: dict[str, Any] = sett if isinstance(sett, dict) else {}
     srv = obj.get("server") or sett_dict.get("address")
     prt = obj.get("server_port") or sett_dict.get("port")
-    if (
-        (not srv or not prt)
-        and (vnext := sett_dict.get("vnext"))
-        and isinstance(vnext, list)
-        and vnext
-        and isinstance(vnext[0], dict)
-    ):
-        srv = srv or vnext[0].get("address")
-        prt = prt or vnext[0].get("port")
-    if (
-        (not srv or not prt)
-        and (servers := sett_dict.get("servers"))
-        and isinstance(servers, list)
-        and servers
-        and isinstance(servers[0], dict)
-    ):
-        srv = srv or servers[0].get("address")
-        prt = prt or servers[0].get("port")
-    peers = obj.get("peers")
-    if not srv and isinstance(peers, list) and peers and isinstance(peers[0], dict):
-        srv = peers[0].get("address") or peers[0].get("server")
-        prt = prt or peers[0].get("port")
+    if (not srv or not prt) and (first_vnext := first_dict(sett_dict.get("vnext"))):
+        srv = srv or first_vnext.get("address")
+        prt = prt or first_vnext.get("port")
+    if (not srv or not prt) and (first_srv := first_dict(sett_dict.get("servers"))):
+        srv = srv or first_srv.get("address")
+        prt = prt or first_srv.get("port")
+    if not srv and (first_peer := first_dict(obj.get("peers"))):
+        srv = first_peer.get("address") or first_peer.get("server")
+        prt = prt or first_peer.get("port")
     return str(srv or ""), int(prt or 0)
 
 

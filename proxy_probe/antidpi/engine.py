@@ -15,6 +15,7 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import IO
 
 from ..engines import project_root
 from .models import StrategyProfile
@@ -39,8 +40,6 @@ atexit.register(_cleanup_active_runners)
 
 def default_zapret_dir() -> Path:
     """Возвращает каталог для бинарников Zapret2 (bin/zapret/ или PROXY_PROBE_ZAPRET_DIR)."""
-    import os
-
     custom = os.environ.get("PROXY_PROBE_ZAPRET_DIR")
     if custom and Path(custom).is_dir():
         return Path(custom)
@@ -229,8 +228,8 @@ class WinwsRunner:
         self.target_ips = set(target_ips)
         self.zapret_dir = zapret_dir or default_zapret_dir()
         self.ports = ports
-        self.process: subprocess.Popen | None = None
-        self._log_file = None
+        self.process: subprocess.Popen[str] | None = None
+        self._log_file: IO[str] | None = None
         self._log_path = self.zapret_dir / "winws.log"
 
     def build_command_line(self) -> list[str]:
@@ -358,5 +357,5 @@ class WinwsRunner:
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> None:
         self.stop()

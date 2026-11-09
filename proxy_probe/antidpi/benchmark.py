@@ -5,7 +5,6 @@ import contextlib
 import copy
 import json
 import logging
-import os
 import socket
 import subprocess
 import time
@@ -19,6 +18,7 @@ from ..engines import (
     app_bin_dir,
     build_singbox_config,
     build_xray_config,
+    clean_proxy_env,
     project_root,
     wait_port,
     xray_shorthand_to_v2ray,
@@ -28,11 +28,11 @@ from ..prober import PREFLIGHT_URL
 from .catalogue import select_mechanical_diversity_sample
 from .isp import IspIdentity
 from .models import CALIBRATION_LEVELS, AntidpiBenchmarkResult, AntidpiDatabase, StrategyProfile
+from .relay import DEFAULT_RELAY_PORT
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RATINGS_FILENAME = "antidpi_ratings.json"
-DEFAULT_RELAY_PORT = 10850
 
 
 def default_ratings_path() -> Path:
@@ -342,11 +342,6 @@ def probe_proxy_tunnel(
         cmd = [str(target_bin), "run", "-c", "stdin"]
 
     cfg_bytes = json.dumps(cfg, ensure_ascii=False).encode("utf-8")
-    clean_env = {
-        k: v
-        for k, v in os.environ.items()
-        if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-    }
 
     try:
         proc = subprocess.Popen(
@@ -354,7 +349,7 @@ def probe_proxy_tunnel(
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env=clean_env,
+            env=clean_proxy_env(),
         )
     except OSError as exc:
         return False, 0, f"сбой запуска: {exc}"

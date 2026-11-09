@@ -18,7 +18,13 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from .engines import build_singbox_config, build_xray_config, wait_port, xray_shorthand_to_v2ray
+from .engines import (
+    build_singbox_config,
+    build_xray_config,
+    clean_proxy_env,
+    wait_port,
+    xray_shorthand_to_v2ray,
+)
 from .models import (
     BLOCK_MARKERS,
     DEAD_PATTERNS,
@@ -36,7 +42,7 @@ from .models import (
     country_code_to_emoji,
     parse_quota_info,
 )
-from .parsers import USER_AGENT
+from .parsers import USER_AGENT, extract_host_port
 
 
 class QuotaCircuitBreaker:
@@ -495,9 +501,9 @@ def enrich_cached_ok_geo(cache: Any, max_workers: int = 10) -> int:
         for fut in concurrent.futures.as_completed(future_to_ip):
             ip = future_to_ip[fut]
             try:
-                res = fut.result()
-                if res[0] or res[2]:
-                    ip_results[ip] = res
+                country, ip_out, code, city, org = fut.result()
+                if country or code:
+                    ip_results[ip] = (country, ip_out, code, city, org)
             except Exception:
                 pass
 
@@ -635,12 +641,59 @@ def _drain_output(pipe: Any, buf: deque[str]) -> None:
         pass
 
 
+def _make_probe_dict(
+    result: str = RESULT_DEAD,
+    *,
+    note: str = "",
+    latency_ms: int = 0,
+    country: str = "",
+    ip_out: str = "",
+    country_code: str = "",
+    city: str = "",
+    org: str = "",
+    web_status: str = "",
+    ingress_country_code: str = "",
+    ingress_ip: str = "",
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "result": result,
+        "country": country,
+        "ip_out": ip_out,
+        "country_code": country_code,
+        "city": city,
+        "org": org,
+        "latency_ms": latency_ms,
+        "note": note,
+    }
+    if web_status or ingress_country_code or ingress_ip:
+        out["web_status"] = web_status
+        out["ingress_country_code"] = ingress_country_code
+        out["ingress_ip"] = ingress_ip
+    return out
+
+
+def _format_agy_note(atext: str, arc: int, probe_timeout: float) -> str:
+    raw_text = " ".join((atext or "").strip().split())
+    if arc == -1:
+        return f"таймаут agy ({probe_timeout:.0f}с)"
+    if arc == -2:
+        return f"ошибка запуска agy: {raw_text}"
+    if raw_text:
+        return raw_text[:250]
+    if arc != 0:
+        return f"rc={arc} (нет вывода)"
+    return ""
+
+
+def _is_cancelled(stop_event: threading.Event | None) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
 def run_probe(
     engine_bin: str,
     is_xray: bool,
     import_obj: dict[str, Any],
     port: int,
-    run_root: Path | None = None,
     timeouts: dict[str, float] | None = None,
     agy_bin: str | None = None,
     print_timeout: str = AGY_PRINT_TIMEOUT_DEFAULT,
@@ -653,17 +706,8 @@ def run_probe(
     check_web: bool = False,
     extra_outbounds: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if stop_event is not None and stop_event.is_set():
-        return {
-            "result": RESULT_DEAD,
-            "country": "",
-            "ip_out": "",
-            "country_code": "",
-            "city": "",
-            "org": "",
-            "latency_ms": 0,
-            "note": "проверка отменена",
-        }
+    if _is_cancelled(stop_event):
+        return _make_probe_dict(note="проверка отменена")
     if timeouts is None:
         timeouts = {}
     resolved_agy_bin = agy_bin or get_default_agy_bin()
@@ -679,19 +723,13 @@ def run_probe(
     log_buffer: deque[str] = deque(maxlen=30)
     drain_thread: threading.Thread | None = None
     proc: subprocess.Popen[bytes] | None = None
-    t0 = time.time()
     try:
-        clean_env = {
-            k: v
-            for k, v in os.environ.items()
-            if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-        }
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=clean_env,
+            env=clean_proxy_env(),
         )
         if proc.stdin is not None:
             proc.stdin.write(cfg_bytes)
@@ -702,93 +740,32 @@ def run_probe(
         if registry is not None:
             registry.register(proc)
     except OSError as e:
-        return {
-            "result": RESULT_DEAD,
-            "country": "",
-            "ip_out": "",
-            "country_code": "",
-            "city": "",
-            "org": "",
-            "latency_ms": 0,
-            "note": f"движок не запустился: {e}",
-        }
+        return _make_probe_dict(note=f"движок не запустился: {e}")
 
     try:
-        if stop_event is not None and stop_event.is_set():
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": 0,
-                "note": "проверка отменена",
-            }
+        if _is_cancelled(stop_event):
+            return _make_probe_dict(note="проверка отменена")
 
         if not wait_port(port, proc, timeouts.get("start", 12.0), stop_event=stop_event):
-            if stop_event is not None and stop_event.is_set():
-                return {
-                    "result": RESULT_DEAD,
-                    "country": "",
-                    "ip_out": "",
-                    "country_code": "",
-                    "city": "",
-                    "org": "",
-                    "latency_ms": 0,
-                    "note": "проверка отменена",
-                }
+            if _is_cancelled(stop_event):
+                return _make_probe_dict(note="проверка отменена")
             note = "\n".join(log_buffer).strip()
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": 0,
-                "note": f"движок не поднял порт: {note[:200]}",
-            }
+            return _make_probe_dict(note=f"движок не поднял порт: {note[:200]}")
 
-        if stop_event is not None and stop_event.is_set():
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": 0,
-                "note": "проверка отменена",
-            }
+        if _is_cancelled(stop_event):
+            return _make_probe_dict(note="проверка отменена")
 
-        # Preflight: быстрая проверка связности туннеля перед запуском тяжёлого agy
-        preflight_ok = preflight_check(port, timeout=timeouts.get("preflight", 2.5))
-        if not preflight_ok:
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": int((time.time() - t0) * 1000),
-                "note": "preflight: туннель не пропускает трафик",
-            }
+        t_pf0 = time.perf_counter()
+        if not preflight_check(port, timeout=timeouts.get("preflight", 2.5)):
+            return _make_probe_dict(
+                latency_ms=int((time.perf_counter() - t_pf0) * 1000),
+                note="preflight: туннель не пропускает трафик",
+            )
+        tunnel_latency_ms = max(1, int((time.perf_counter() - t_pf0) * 1000))
 
-        if stop_event is not None and stop_event.is_set():
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": 0,
-                "note": "проверка отменена",
-            }
+        if _is_cancelled(stop_event):
+            return _make_probe_dict(note="проверка отменена")
 
-        # Geo-данные уже можно получить — туннель жив
         geo_res = fetch_geo(port, timeouts.get("geo", 8.0))
         if len(geo_res) == 5:
             country, ip_out, country_code, city, org = geo_res
@@ -797,35 +774,28 @@ def run_probe(
             country_code, city, org = "", "", ""
         else:
             country, ip_out, country_code, city, org = "", "", "", "", ""
+        geo_kw = {"country": country, "ip_out": ip_out, "country_code": country_code, "city": city, "org": org}
 
-        # Zero-Quota Geo Precheck (быстрый отсев геоблока до запуска agy)
         if use_geo_precheck:
             is_blocked, block_reason = geo_precheck(port, timeouts.get("geo_precheck", 2.5))
             if is_blocked:
-                return {
-                    "result": RESULT_BLOCK,
-                    "country": country,
-                    "ip_out": ip_out,
-                    "country_code": country_code,
-                    "city": city,
-                    "org": org,
-                    "latency_ms": int((time.time() - t0) * 1000),
-                    "note": f"геоблок (быстрый precheck: {block_reason})",
-                    "web_status": WEB_STATUS_BLOCKED,
-                }
+                return _make_probe_dict(
+                    RESULT_BLOCK,
+                    latency_ms=tunnel_latency_ms,
+                    note=f"геоблок (быстрый precheck: {block_reason})",
+                    web_status=WEB_STATUS_BLOCKED,
+                    **geo_kw,
+                )
 
         if circuit_breaker is not None and circuit_breaker.is_tripped:
-            return {
-                "result": RESULT_UNKNOWN,
-                "country": country,
-                "ip_out": ip_out,
-                "country_code": country_code,
-                "city": city,
-                "org": org,
-                "latency_ms": int((time.time() - t0) * 1000),
-                "note": "пропущено (квота agy исчерпана)",
-            }
+            return _make_probe_dict(
+                RESULT_UNKNOWN,
+                latency_ms=tunnel_latency_ms,
+                note="пропущено (квота agy исчерпана)",
+                **geo_kw,
+            )
 
+        probe_timeout = timeouts.get("probe", 45.0)
         try:
             if agy_semaphore is not None:
                 with agy_semaphore:
@@ -833,7 +803,7 @@ def run_probe(
                         port,
                         resolved_agy_bin,
                         print_timeout,
-                        timeouts.get("probe", 45.0),
+                        probe_timeout,
                         model=agy_model,
                         stop_event=stop_event,
                         registry=registry,
@@ -843,62 +813,34 @@ def run_probe(
                     port,
                     resolved_agy_bin,
                     print_timeout,
-                    timeouts.get("probe", 45.0),
+                    probe_timeout,
                     model=agy_model,
                     stop_event=stop_event,
                     registry=registry,
                 )
         except Exception as e:
-            return {
-                "result": RESULT_DEAD,
-                "country": country,
-                "ip_out": ip_out,
-                "country_code": country_code,
-                "city": city,
-                "org": org,
-                "latency_ms": int((time.time() - t0) * 1000),
-                "note": f"agy: {e}"[:160],
-            }
+            return _make_probe_dict(
+                latency_ms=tunnel_latency_ms,
+                note=f"agy: {e}"[:160],
+                **geo_kw,
+            )
 
-        if stop_event is not None and stop_event.is_set():
-            return {
-                "result": RESULT_DEAD,
-                "country": "",
-                "ip_out": "",
-                "country_code": "",
-                "city": "",
-                "org": "",
-                "latency_ms": 0,
-                "note": "проверка отменена",
-            }
+        if _is_cancelled(stop_event):
+            return _make_probe_dict(note="проверка отменена")
 
-        latency = int((time.time() - t0) * 1000)
+        latency = tunnel_latency_ms
 
         quota_info = parse_quota_info(atext or "")
         if quota_info.is_exhausted:
             if circuit_breaker is not None:
                 circuit_breaker.trip(quota_info.clean_note)
-            result = RESULT_UNKNOWN
+            result: str = RESULT_UNKNOWN
             note = quota_info.clean_note
         else:
             result = classify_agy(atext or "", arc)
-
-            # Если agy таймаутнул (rc == -1), но preflight прошёл — туннель жив,
-            # проблема в agy/API, а не в прокси → UNKNOWN, не DEAD
             if arc == -1 and result == RESULT_DEAD:
                 result = RESULT_UNKNOWN
-
-            raw_text = " ".join((atext or "").strip().split())
-            if arc == -1:
-                note = f"таймаут agy ({timeouts.get('probe', 45.0):.0f}с)"
-            elif arc == -2:
-                note = f"ошибка запуска agy: {raw_text}"
-            elif raw_text:
-                note = raw_text[:250]
-            elif arc != 0:
-                note = f"rc={arc} (нет вывода)"
-            else:
-                note = ""
+            note = _format_agy_note(atext or "", arc, probe_timeout)
 
         web_status = ""
         if check_web and result == RESULT_OK:
@@ -909,26 +851,14 @@ def run_probe(
 
         ingress_country_code = ""
         ingress_ip = ""
-        server_host = str(import_obj.get("server") or "").strip()
-        if not server_host:
-            sett = import_obj.get("settings")
-            if isinstance(sett, dict):
-                vnext = sett.get("vnext")
-                if isinstance(vnext, list) and vnext and isinstance(vnext[0], dict):
-                    server_host = str(vnext[0].get("address") or "").strip()
+        raw_host, _ = extract_host_port(import_obj)
+        server_host = raw_host.strip()
 
         if server_host and ip_out and server_host != ip_out:
             ingress_country_code, ingress_ip = resolve_ingress_country(server_host, timeout=3.0)
 
         return {
-            "result": result,
-            "country": country,
-            "ip_out": ip_out,
-            "country_code": country_code,
-            "city": city,
-            "org": org,
-            "latency_ms": latency,
-            "note": note,
+            **_make_probe_dict(result, note=note, latency_ms=latency, **geo_kw),
             "web_status": web_status,
             "ingress_country_code": ingress_country_code,
             "ingress_ip": ingress_ip,

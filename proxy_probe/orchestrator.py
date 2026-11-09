@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
-import shutil
 import sys
-import tempfile
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from .models import Server
@@ -23,7 +20,6 @@ __all__ = [
     "gather_sources",
     "interactive_select",
     "pause_on_exit",
-    "run_dir",
 ]
 
 
@@ -31,14 +27,6 @@ def pause_on_exit(no_pause: bool = False) -> None:
     if not no_pause and sys.stdin and sys.stdin.isatty():
         with contextlib.suppress(EOFError, KeyboardInterrupt):
             input("\nНажмите Enter для выхода...")
-
-
-def run_dir() -> Path:
-    base = Path(tempfile.gettempdir()) / "proxy-probe" / "run"
-    if base.exists():
-        shutil.rmtree(base, ignore_errors=True)
-    base.mkdir(parents=True, exist_ok=True)
-    return base
 
 
 def fetch_subscription(url: str, timeout: float = 25.0) -> bytes | None:
@@ -70,24 +58,6 @@ def fetch_subscriptions_batch(
             except Exception:
                 results[url] = None
     return results
-
-
-def _canonical_structure(val: Any) -> Any:
-    if isinstance(val, dict):
-        return {
-            k: _canonical_structure(v)
-            for k, v in sorted(val.items())
-            if k not in ("tag", "remarks", "packet_encoding")
-        }
-    if isinstance(val, list):
-        items = [_canonical_structure(x) for x in val]
-        if all(isinstance(x, (str, int, float, bool)) for x in items):
-            try:
-                return sorted(items)
-            except TypeError:
-                return sorted(items, key=repr)
-        return items
-    return val
 
 
 def dedupe_servers(items: list[Server]) -> list[Server]:

@@ -138,6 +138,109 @@ def _extract_transport_name(transport_obj: Any) -> str:
     return t_type.upper()
 
 
+def _evaluate_shadowsocks_method(method: str, transport: str) -> SecurityInfo:
+    if not method or method in ("none", "plain"):
+        return SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
+    if method in STREAM_CIPHERS:
+        return SecurityInfo(label="Weak Cipher", transport=transport, level=SecurityLevel.WEAK)
+    return SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
+
+
+def _evaluate_xray_security(
+    server_obj: dict[str, Any],
+    transport: str,
+    host: str,
+) -> tuple[SecurityInfo, str]:
+    ss = server_obj.get("streamSettings")
+    if not isinstance(ss, dict):
+        ss = {}
+    net = str(ss.get("network", "")).lower()
+    if net and net not in ("tcp", "raw"):
+        transport = "WebSocket" if net == "ws" else net.upper()
+
+    sec = str(ss.get("security", "")).lower()
+    settings = server_obj.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    resolved_host = host or str(settings.get("address", ""))
+
+    if sec == "reality":
+        return SecurityInfo(label="Reality", transport=transport, level=SecurityLevel.SECURE), resolved_host
+    if sec in ("tls", "xtls"):
+        tls_settings = ss.get("tlsSettings")
+        if not isinstance(tls_settings, dict):
+            tls_settings = {}
+        allow_insecure = bool(tls_settings.get("allowInsecure"))
+        pinned_sha = tls_settings.get("pinnedPeerCertSha256")
+        pinned_name = tls_settings.get("verifyPeerCertByName")
+        pinned = bool(
+            (isinstance(pinned_sha, str) and pinned_sha.strip())
+            or (isinstance(pinned_name, str) and pinned_name.strip())
+        )
+        if allow_insecure and not pinned:
+            return SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK), resolved_host
+        return SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE), resolved_host
+
+    protocol = str(server_obj.get("protocol", "")).lower()
+    if protocol == "shadowsocks":
+        method = str(settings.get("method", "")).lower()
+        return _evaluate_shadowsocks_method(method, transport), resolved_host
+    if protocol == "wireguard":
+        return SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE), resolved_host
+    if protocol == "vless":
+        enc = str(settings.get("encryption", "")).lower()
+        if enc and enc != "none":
+            return SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE), resolved_host
+        return SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE), resolved_host
+    if protocol == "vmess":
+        return SecurityInfo(label="Insecure", transport=transport, level=SecurityLevel.WEAK), resolved_host
+    return SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE), resolved_host
+
+
+def _evaluate_singbox_security(server_obj: dict[str, Any], transport: str) -> SecurityInfo:
+    ptype = str(server_obj.get("type", "")).lower()
+
+    if ptype == "shadowsocks":
+        method = str(server_obj.get("method", "")).lower()
+        return _evaluate_shadowsocks_method(method, transport)
+
+    if ptype == "vmess":
+        tls = server_obj.get("tls")
+        if isinstance(tls, dict) and tls.get("enabled"):
+            if tls.get("insecure"):
+                return SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK)
+            return SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
+        sec = str(server_obj.get("security", "auto")).lower()
+        if sec in ("none", "zero"):
+            return SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
+        return SecurityInfo(label="Insecure", transport=transport, level=SecurityLevel.WEAK)
+
+    if ptype == "wireguard":
+        return SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
+
+    if ptype == "ssh":
+        if not server_obj.get("host_key"):
+            return SecurityInfo(label="Unverified Host Key", transport=transport, level=SecurityLevel.WEAK)
+        return SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
+
+    tls = server_obj.get("tls")
+    if not isinstance(tls, dict):
+        tls = {}
+    reality = tls.get("reality")
+    if not isinstance(reality, dict):
+        reality = {}
+
+    if reality.get("enabled"):
+        return SecurityInfo(label="Reality", transport=transport, level=SecurityLevel.SECURE)
+    if tls.get("certificate_sha256") or tls.get("certificate_public_key_sha256"):
+        return SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
+    if tls.get("insecure"):
+        return SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK)
+    if tls.get("enabled") or ptype in ("hysteria", "hysteria2", "tuic", "juicity"):
+        return SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
+    return SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
+
+
 def evaluate_security(server_or_obj: Server | dict[str, Any], engine: str = "sing-box") -> SecurityInfo:
     """Определяет уровень безопасности сервера согласно правилам Throne."""
     if hasattr(server_or_obj, "import_obj"):
@@ -152,134 +255,16 @@ def evaluate_security(server_or_obj: Server | dict[str, Any], engine: str = "sin
     if not isinstance(server_obj, dict):
         return SecurityInfo(label="Unknown", level=SecurityLevel.UNKNOWN)
 
-    transport = ""
-    if "transport" in server_obj:
-        transport = _extract_transport_name(server_obj["transport"])
-
-    # --- Анализ Xray конфигурации ---
-    is_xray = (
-        eng == "xray"
-        or "streamSettings" in server_obj
-        or server_obj.get("protocol") == "vless"
-    )
+    transport = _extract_transport_name(server_obj["transport"]) if "transport" in server_obj else ""
+    is_xray = eng == "xray" or "streamSettings" in server_obj or server_obj.get("protocol") == "vless"
 
     if is_xray:
-        ss = server_obj.get("streamSettings")
-        if not isinstance(ss, dict):
-            ss = {}
-        net = str(ss.get("network", "")).lower()
-        if net and net not in ("tcp", "raw"):
-            transport = "WebSocket" if net == "ws" else net.upper()
-
-        sec = str(ss.get("security", "")).lower()
-        settings = server_obj.get("settings")
-        if not isinstance(settings, dict):
-            settings = {}
-        host = host or str(settings.get("address", ""))
-
-        if sec == "reality":
-            info = SecurityInfo(label="Reality", transport=transport, level=SecurityLevel.SECURE)
-        elif sec in ("tls", "xtls"):
-            tls_settings = ss.get("tlsSettings")
-            if not isinstance(tls_settings, dict):
-                tls_settings = {}
-            allow_insecure = bool(tls_settings.get("allowInsecure"))
-            pinned_sha = tls_settings.get("pinnedPeerCertSha256")
-            pinned_name = tls_settings.get("verifyPeerCertByName")
-            pinned = bool(
-                (isinstance(pinned_sha, str) and pinned_sha.strip())
-                or (isinstance(pinned_name, str) and pinned_name.strip())
-            )
-            if allow_insecure and not pinned:
-                info = SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK)
-            else:
-                info = SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
-        else:
-            protocol = str(server_obj.get("protocol", "")).lower()
-            if protocol == "shadowsocks":
-                method = str(settings.get("method", "")).lower()
-                if not method or method in ("none", "plain"):
-                    info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-                elif method in STREAM_CIPHERS:
-                    info = SecurityInfo(label="Weak Cipher", transport=transport, level=SecurityLevel.WEAK)
-                else:
-                    info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-            elif protocol == "wireguard":
-                info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-            elif protocol == "vless":
-                enc = str(settings.get("encryption", "")).lower()
-                if enc and enc != "none":
-                    info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-                else:
-                    info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-            elif protocol == "vmess":
-                info = SecurityInfo(label="Insecure", transport=transport, level=SecurityLevel.WEAK)
-            else:
-                info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-
-    # --- Анализ sing-box конфигурации ---
+        info, host = _evaluate_xray_security(server_obj, transport, host)
     else:
-        ptype = str(server_obj.get("type", "")).lower()
+        info = _evaluate_singbox_security(server_obj, transport)
 
-        if ptype == "shadowsocks":
-            method = str(server_obj.get("method", "")).lower()
-            if not method or method in ("none", "plain"):
-                info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-            elif method in STREAM_CIPHERS:
-                info = SecurityInfo(label="Weak Cipher", transport=transport, level=SecurityLevel.WEAK)
-            else:
-                info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-
-        elif ptype == "vmess":
-            tls = server_obj.get("tls")
-            if isinstance(tls, dict) and tls.get("enabled"):
-                if tls.get("insecure"):
-                    info = SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK)
-                else:
-                    info = SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
-            else:
-                sec = str(server_obj.get("security", "auto")).lower()
-                if sec in ("none", "zero"):
-                    info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-                else:
-                    info = SecurityInfo(label="Insecure", transport=transport, level=SecurityLevel.WEAK)
-
-        elif ptype == "wireguard":
-            info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-
-        elif ptype == "ssh":
-            if not server_obj.get("host_key"):
-                info = SecurityInfo(label="Unverified Host Key", transport=transport, level=SecurityLevel.WEAK)
-            else:
-                info = SecurityInfo(label="Encrypted", transport=transport, level=SecurityLevel.SECURE)
-
-        else:
-            # vless, trojan, hysteria, hysteria2, tuic, juicity, naive, direct, etc.
-            tls = server_obj.get("tls")
-            if not isinstance(tls, dict):
-                tls = {}
-            reality = tls.get("reality")
-            if not isinstance(reality, dict):
-                reality = {}
-
-            if reality.get("enabled"):
-                info = SecurityInfo(label="Reality", transport=transport, level=SecurityLevel.SECURE)
-            elif tls.get("certificate_sha256") or tls.get("certificate_public_key_sha256"):
-                info = SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
-            elif tls.get("insecure"):
-                info = SecurityInfo(label="Insecure TLS", transport=transport, level=SecurityLevel.WEAK)
-            elif tls.get("enabled") or ptype in ("hysteria", "hysteria2", "tuic", "juicity"):
-                info = SecurityInfo(label="TLS", transport=transport, level=SecurityLevel.SECURE)
-            else:
-                info = SecurityInfo(label="Raw", transport=transport, level=SecurityLevel.NONE)
-
-    # Приватный хост освобождает от классификации опасности (WithPrivateServer)
     if info.is_dangerous and is_private_host(host):
-        return SecurityInfo(
-            label="Private",
-            transport=info.transport,
-            level=SecurityLevel.SECURE,
-        )
+        return SecurityInfo(label="Private", transport=info.transport, level=SecurityLevel.SECURE)
 
     return info
 

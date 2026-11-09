@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from proxy_probe.antidpi.__main__ import main
 from proxy_probe.antidpi.elevation import TeeOutput, is_admin, run_elevated_and_wait
+from proxy_probe.cli import main
 
 
 def test_is_admin_returns_bool() -> None:
@@ -38,52 +38,52 @@ def test_run_elevated_user_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cmd_benchmark_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.is_admin", lambda: False)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.run_elevated_and_wait", mock_run)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)
 
-    # Запускаем main(['benchmark', '--limit', '5'])
-    rc = main(["benchmark", "--limit", "5"])
+    rc = main(["--calibrate", "2", "--antidpi-limit", "5"])
     assert rc == 0
     assert mock_run.called
     _args, kwargs = mock_run.call_args
     params = kwargs.get("params") or _args[1]
-    assert "-m proxy_probe.antidpi benchmark --limit 5" in params
+    assert "-m proxy_probe --calibrate 2" in params
+    assert "--antidpi-limit 5" in params
     assert "--log-output" in params
 
 
 def test_cmd_benchmark_elevates_cancelled_user(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.is_admin", lambda: False)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
 
     def mock_run_fail(**_):
         raise PermissionError("Запрос прав Администратора (UAC) был отклонён пользователем.")
 
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.run_elevated_and_wait", mock_run_fail)
-    rc = main(["benchmark"])
+    monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run_fail)
+    rc = main(["--calibrate", "2"])
     assert rc == 1223
 
 
 def test_cmd_serve_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.is_admin", lambda: False)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.run_elevated_and_wait", mock_run)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)
 
-    rc = main(["serve", "--port", "10850"])
+    rc = main(["--serve", "--antidpi-port", "10850"])
     assert rc == 0
     assert mock_run.called
     _args, kwargs = mock_run.call_args
     params = kwargs.get("params") or _args[1]
-    assert "-m proxy_probe.antidpi serve --port 10850" in params
+    assert "-m proxy_probe --serve --antidpi-port 10850" in params
 
 
 def test_cmd_benchmark_with_levels(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.is_admin", lambda: False)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
-    monkeypatch.setattr("proxy_probe.antidpi.__main__.run_elevated_and_wait", mock_run)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)
 
     for lvl in (2, 3, 4):
-        rc = main(["benchmark", "--level", str(lvl)])
+        rc = main(["--calibrate", str(lvl)])
         assert rc == 0
         _args, kwargs = mock_run.call_args
         params = kwargs.get("params") or _args[1]
-        assert f"-m proxy_probe.antidpi benchmark --level {lvl}" in params
+        assert f"-m proxy_probe --calibrate {lvl}" in params

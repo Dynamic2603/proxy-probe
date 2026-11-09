@@ -9,13 +9,11 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import copy
 import dataclasses
-import json
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -25,10 +23,28 @@ from typing import Any
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from .antidpi.elevation import disable_quick_edit_mode
+from .antidpi.runner import (
+    print_relay_status,
+    run_calibration,
+    run_catalogue_update,
+    run_relay_service,
+    stop_relay_service,
+)
+from .antidpi.stage2 import execute_antidpi_stage, run_stage2_worker
 from .cache import ResultCache, default_cache_path
-from .engines import alloc_port, ensure_binaries, project_root
+from .engines import alloc_port, ensure_binaries
 from .gist import mask_gist_id, resolve_gist_id, sync_file_to_gist
-from .models import DEFAULT_TTLS, RESULT_DEAD, RESULT_UNKNOWN, Server
+from .models import (
+    DEFAULT_TTLS,
+    RESULT_DEAD,
+    RESULT_OK,
+    RESULT_UNKNOWN,
+    STATE_ACTIVE,
+    STATE_DEAD,
+    STATE_DEGRADED,
+    Server,
+)
 from .orchestrator import (
     dedupe_servers,
     gather_sources,
@@ -61,11 +77,11 @@ from .ui import (
     format_live_counters,
     print_results_table,
     print_summary_panel,
+    select_calibration_level_interactive,
+    select_main_action_interactive,
 )
 
 __all__ = ["main"]
-
-ANTIDPI_BATCH_SIZE: int = 150
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -249,7 +265,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--antidpi-limit",
         type=int,
         default=0,
-        help="максимум DEAD-серверов для проверки в Stage 2 (0 = все пачками по 150, по умолчанию 0)",
+        help="максимум DEAD-серверов для проверки в Stage 2 или калибровке (0 = по умолчанию)",
+    )
+    ap.add_argument(
+        "--antidpi-top",
+        type=int,
+        default=None,
+        help="ограничить количество проверяемых стратегий при калибровке",
+    )
+    ap.add_argument(
+        "--calibrate",
+        type=int,
+        choices=[2, 3, 4],
+        default=None,
+        help="запустить калибровку стратегий Anti-DPI (уровень 2, 3 или 4)",
+    )
+    ap.add_argument(
+        "--serve",
+        action="store_true",
+        help="запустить постоянный локальный SOCKS5-релей Zapret2",
+    )
+    ap.add_argument(
+        "--detach",
+        action="store_true",
+        help="запустить релей Zapret2 в фоновом режиме (detached)",
+    )
+    ap.add_argument(
+        "--stop-relay",
+        action="store_true",
+        help="остановить работающий фоновый релей Zapret2 и выгрузить WinDivert",
+    )
+    ap.add_argument(
+        "--status-relay",
+        action="store_true",
+        help="показать текущий статус фонового релея Zapret2",
+    )
+    ap.add_argument(
+        "--update-catalogue",
+        action="store_true",
+        help="обновить каталог 484 стратегий Anti-DPI из upstream",
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="подробная детализация причин сбоев при калибровке",
+    )
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="включить профилирование cProfile при калибровке",
     )
     ap.add_argument(
         "--isp",
@@ -316,7 +381,7 @@ class RuntimeContext:
 
 def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     agy_bin = _resolve_agy_bin(args.agy_bin)
-    print(f"Пробер agy: {agy_bin}")
+    console.print(f"Пробер agy: {agy_bin}")
 
     cache_path = Path(args.cache) if args.cache else default_cache_path()
     ttl_map = {"AGY-OK": args.ttl_ok, "AGY-BLOCK": args.ttl_blocked, "DEAD": args.ttl_dead}
@@ -324,17 +389,17 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
 
     if cache:
         ttl_txt = ", ".join(f"{k}={v // 3600}ч" if v > 0 else f"{k}=∞" for k, v in ttl_map.items())
-        print(f"Кэш: {cache_path} (записей: {len(cache.entries)}, TTL: {ttl_txt})")
+        console.print(f"Кэш: {cache_path} (записей: {len(cache.entries)}, TTL: {ttl_txt})")
         try:
             enr = enrich_cached_ok_geo(cache)
             if enr > 0:
-                print(f"Кэш: обогащено гео-данными {enr} записей AGY-OK")
+                console.print(f"Кэш: обогащено гео-данными {enr} записей AGY-OK")
         except Exception:
             pass
 
     agy_model = args.agy_model or detect_best_agy_model(agy_bin, cache=cache)
     if agy_model:
-        print(f"Модель agy: {agy_model}")
+        console.print(f"Модель agy: {agy_model}")
 
     initial_cb: QuotaCircuitBreaker | None = None
     if not args.skip_precheck:
@@ -365,14 +430,14 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     import_path = out_dir / "proxy-ok.txt"
 
     ver_sb, ver_xr = detect_throne_versions(default_throne_dir())
-    print(f"Версии движков Throne: sing-box v{ver_sb}, Xray v{ver_xr}")
+    console.print(f"Версии движков Throne: sing-box v{ver_sb}, Xray v{ver_xr}")
 
     sb_exe, xr_exe = ensure_binaries(ver_sb, ver_xr, force=False)
-    print(f"Движки: {sb_exe}, {xr_exe}")
+    console.print(f"Движки: {sb_exe}, {xr_exe}")
 
     gist_id = resolve_gist_id(getattr(args, "gist_id", None))
     if gist_id:
-        print(f"Синхронизация Gist: включена (ID: {mask_gist_id(gist_id)})")
+        console.print(f"Синхронизация Gist: включена (ID: {mask_gist_id(gist_id)})")
 
     return RuntimeContext(
         agy_bin=agy_bin,
@@ -409,12 +474,21 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
     )
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ServerSelection:
+    servers: list[Server]
+    to_probe: list[Server]
+    cached_counts: dict[str, int]
+    cached_unique_hosts: dict[str, set[str]]
+    warnings: list[str]
+
+
 def _collect_and_select_servers(
     args: argparse.Namespace,
     groups: list[dict[str, Any]],
     cache: ResultCache | None,
     ttl_map: dict[str, int],
-) -> tuple[list[Server], list[Server], dict[str, int], dict[str, set[str]], list[str]] | None:
+) -> ServerSelection | None:
     selected = set(int(x) for x in args.group)
     if not selected:
         counts: dict[int, int] = {}
@@ -450,7 +524,7 @@ def _collect_and_select_servers(
 
     for s in servers:
         rec = cache.get_valid_server(s) if (cache and not args.refresh_cache) else None
-        if rec and getattr(args, "refresh_dead", False) and rec.get("result") == "DEAD":
+        if rec and getattr(args, "refresh_dead", False) and rec.get("result") == RESULT_DEAD:
             rec = None
         if rec:
             res = rec.get("result", "")
@@ -462,8 +536,8 @@ def _collect_and_select_servers(
             s.org = rec.get("org", "")
             s.latency_ms = rec.get("latency_ms", 0)
             s.note = rec.get("note", "")
-            s.score = int(rec.get("score", 70 if res == "AGY-OK" else 0))
-            s.state = str(rec.get("state", "ACTIVE" if res == "AGY-OK" else "DEAD"))
+            s.score = int(rec.get("score", 70 if res == RESULT_OK else 0))
+            s.state = str(rec.get("state", STATE_ACTIVE if res == RESULT_OK else STATE_DEAD))
             s.consecutive_fails = int(rec.get("consecutive_fails", 0))
             s.web_status = str(rec.get("web_status", ""))
             s.ingress_country_code = str(rec.get("ingress_country_code", ""))
@@ -474,7 +548,13 @@ def _collect_and_select_servers(
         else:
             to_probe.append(s)
 
-    return servers, to_probe, cached_counts, cached_unique_hosts, warnings
+    return ServerSelection(
+        servers=servers,
+        to_probe=to_probe,
+        cached_counts=cached_counts,
+        cached_unique_hosts=cached_unique_hosts,
+        warnings=warnings,
+    )
 
 
 def _probe_worker(
@@ -489,7 +569,6 @@ def _probe_worker(
     circuit_breaker: QuotaCircuitBreaker | None = None,
     stop_event: threading.Event | None = None,
     registry: ProcessRegistry | None = None,
-    run_root: Path | None = None,
     use_geo_precheck: bool = True,
     check_web: bool = False,
     extra_outbounds: list[dict[str, Any]] | None = None,
@@ -500,7 +579,6 @@ def _probe_worker(
         is_xray=is_xray,
         import_obj=import_obj,
         port=port,
-        run_root=run_root,
         timeouts=timeouts,
         agy_bin=agy_bin,
         print_timeout=print_timeout,
@@ -574,13 +652,15 @@ def _execute_probe_pool(
             for s in to_probe:
                 if s.is_tcp_protocol:
                     res = tcp_results.get((s.server, s.server_port))
-                    if res and not res[0]:
-                        s.result = RESULT_DEAD
-                        s.latency_ms = res[1]
-                        s.note = res[2]
-                        completed_count += 1
-                        stage0_dead_cnt += 1
-                        continue
+                    if res is not None:
+                        is_alive, tcp_lat, tcp_note = res
+                        if not is_alive:
+                            s.result = RESULT_DEAD
+                            s.latency_ms = tcp_lat
+                            s.note = tcp_note
+                            completed_count += 1
+                            stage0_dead_cnt += 1
+                            continue
                 survivors.append(s)
 
             if stage0_dead_cnt:
@@ -595,7 +675,9 @@ def _execute_probe_pool(
         return completed_count, interrupted
 
     # Stage 1: Полноценная проверка через движки sing-box / Xray (In-Memory)
-    use_rep_filter = getattr(ctx, "use_rep_filter", True)
+    # Фильтр представителей применяется только если Stage 0 TCP-предфильтр был отключён
+    tcp_prefilter_enabled = bool(getattr(ctx, "use_tcp_prefilter", True))
+    use_rep_filter = bool(getattr(ctx, "use_rep_filter", True)) and not tcp_prefilter_enabled
     total = len(to_probe_engine)
     pbar = tqdm(
         total=total,
@@ -718,517 +800,19 @@ def _execute_probe_pool(
     return completed_count, interrupted
 
 
-def _execute_antidpi_stage(
-    servers: list[Server],
+
+MIN_PROBED_FOR_OUTAGE_GUARD: int = 5
+
+
+def _is_mass_network_outage(
     to_probe: list[Server],
-    ctx: RuntimeContext,
-    timeouts: dict[str, float],
-    print_timeout: str,
-    circuit_breaker: QuotaCircuitBreaker | None = None,
-) -> int:
-    """Stage 2: Оживление DEAD серверов через изолированный Zapret2 SOCKS5-релей (SSOT)."""
-    if not ctx.antidpi:
-        return 0
-
-    from .antidpi.elevation import is_admin
-
-    candidates_pool = servers
-    raw_candidates = [
-        s for s in candidates_pool
-        if s.result == RESULT_DEAD
-        and s.server
-        and not (s.note and (s.note.startswith("tcp:") or "L4 TCP" in s.note))
-    ]
-    if not raw_candidates:
-        console.print(
-            "[dim]Anti-DPI: серверов с открытым TCP сокетом для спасения нет, запуск релея не требуется.[/dim]"
-        )
-        return 0
-
-    seen_endpoints: set[tuple[str, int]] = set()
-    dead_candidates: list[Server] = []
-    for s in raw_candidates:
-        ep = (s.server, s.server_port)
-        if ep not in seen_endpoints:
-            seen_endpoints.add(ep)
-            dead_candidates.append(s)
-
-    limit = getattr(ctx, "antidpi_limit", 0)
-    if limit > 0 and len(dead_candidates) > limit:
-        dead_candidates = dead_candidates[:limit]
-
-    if not dead_candidates:
-        return 0
-
-    if not is_admin():
-        if getattr(ctx, "no_elevate", False):
-            console.print(
-                "[yellow]⚠ Stage 2 Anti-DPI пропущен: запуск без прав Администратора (--no-elevate).[/yellow]"
-            )
-            return 0
-        return _delegate_stage2_elevated(
-            dead_candidates=dead_candidates,
-            servers=servers,
-            to_probe=to_probe,
-            ctx=ctx,
-            timeouts=timeouts,
-            print_timeout=print_timeout,
-        )
-
-    return _execute_antidpi_stage_core(
-        dead_candidates=dead_candidates,
-        to_probe=to_probe,
-        ctx=ctx,
-        timeouts=timeouts,
-        print_timeout=print_timeout,
-        circuit_breaker=circuit_breaker,
-    )
-
-
-def _delegate_stage2_elevated(
-    dead_candidates: list[Server],
-    servers: list[Server],
-    to_probe: list[Server],
-    ctx: RuntimeContext,
-    timeouts: dict[str, float],
-    print_timeout: str,
-) -> int:
-    from .antidpi.elevation import run_elevated_and_wait
-    from .models import RESULT_OK, STATE_ACTIVE
-
-    stage_dir = Path(tempfile.gettempdir()) / "proxy-probe"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
-    task_path = stage_dir / f"stage2_task_{pid}.json"
-    result_path = stage_dir / f"stage2_result_{pid}.json"
-    log_path = stage_dir / f"stage2_log_{pid}.log"
-
-    task_data = {
-        "cache_path": str(ctx.cache_path) if ctx.cache_path else "",
-        "sb_exe": str(ctx.sb_exe) if ctx.sb_exe else "",
-        "xr_exe": str(ctx.xr_exe) if ctx.xr_exe else "",
-        "dead_candidates": [
-            {
-                "cache_key": s.cache_key,
-                "config_identity": s.config_identity,
-                "server": s.server,
-                "server_port": s.server_port,
-                "engine": s.engine,
-                "import_obj": s.import_obj,
-                "group_id": s.group_id,
-                "group_name": s.group_name,
-                "name": s.name,
-                "source": s.source,
-            }
-            for s in dead_candidates
-        ],
-        "antidpi_strategy": ctx.antidpi_strategy,
-        "antidpi_port": ctx.antidpi_port,
-        "antidpi_limit": getattr(ctx, "antidpi_limit", 0),
-        "isp": ctx.isp,
-        "agy_bin": ctx.agy_bin,
-        "agy_model": getattr(ctx, "agy_model", None),
-        "agy_concurrency": getattr(ctx, "agy_concurrency", 2),
-        "jobs": getattr(ctx, "jobs", 16),
-        "timeouts": timeouts,
-        "print_timeout": print_timeout,
-        "use_geo_precheck": ctx.use_geo_precheck,
-        "check_web": ctx.check_web,
-        "result_path": str(result_path),
-    }
-    task_path.write_text(json.dumps(task_data, ensure_ascii=False), encoding="utf-8")
-
-    console.print("\n" + "=" * 70)
-    console.print("  proxy-probe: Запрос прав Администратора для проверки Anti-DPI (Stage 2)")
-    console.print("  Пожалуйста, подтвердите UAC (нажмите 'Да') в системном окне на экране...")
-    console.print("=" * 70 + "\n")
-
-    elev_params = subprocess.list2cmdline([
-        "-m", "proxy_probe",
-        "--stage2-worker", str(task_path),
-        "--log-output", str(log_path),
-    ])
-
-    try:
-        rc = run_elevated_and_wait(executable=sys.executable, params=elev_params, cwd=project_root())
-        if rc != 0 and rc != 1223:
-            console.print(f"[yellow]Stage 2 воркер завершился с кодом {rc}[/yellow]")
-    except PermissionError:
-        console.print(
-            "[yellow]⚠ Stage 2 Anti-DPI пропущен: запрос прав Администратора (UAC) отклонён пользователем.[/yellow]"
-        )
-        with contextlib.suppress(Exception):
-            task_path.unlink(missing_ok=True)
-        return 0
-    except Exception as exc:
-        console.print(f"[yellow]⚠ Ошибка вызова UAC для Stage 2: {exc}[/yellow]")
-        with contextlib.suppress(Exception):
-            task_path.unlink(missing_ok=True)
-        return 0
-
-    with contextlib.suppress(Exception):
-        task_path.unlink(missing_ok=True)
-        log_path.unlink(missing_ok=True)
-
-    if not result_path.is_file():
-        return 0
-
-    rescued_count = 0
-    try:
-        result_data = json.loads(result_path.read_text(encoding="utf-8"))
-        rescued_map = {item["config_identity"]: item for item in result_data.get("rescued", [])}
-
-        for s in servers:
-            if s.config_identity in rescued_map:
-                info = rescued_map[s.config_identity]
-                s.result = info.get("result", RESULT_OK)
-                s.country = info.get("country", "")
-                s.ip_out = info.get("ip_out", "")
-                s.country_code = info.get("country_code", "")
-                s.city = info.get("city", "")
-                s.org = info.get("org", "")
-                s.latency_ms = info.get("latency_ms", 0)
-                s.note = info.get("note", "")
-                s.web_status = info.get("web_status", "")
-                s.ingress_country_code = info.get("ingress_country_code", "")
-                s.ingress_ip = info.get("ingress_ip", "")
-                s.antidpi_strategy = info.get("antidpi_strategy")
-                s.state = info.get("state", STATE_ACTIVE)
-                rescued_count += 1
-                if s not in to_probe:
-                    to_probe.append(s)
-
-        if ctx.cache:
-            for s in to_probe:
-                if s.result == RESULT_OK and s.config_identity in rescued_map:
-                    ctx.cache.entries[s.cache_key] = ctx.cache.entries.get(s.cache_key, {})
-                    ctx.cache.entries[s.cache_key].update({
-                        "result": s.result,
-                        "country": s.country,
-                        "ip_out": s.ip_out,
-                        "country_code": s.country_code,
-                        "city": s.city,
-                        "org": s.org,
-                        "latency_ms": s.latency_ms,
-                        "note": s.note,
-                        "web_status": s.web_status,
-                        "ingress_country_code": s.ingress_country_code,
-                        "ingress_ip": s.ingress_ip,
-                        "antidpi_strategy": s.antidpi_strategy,
-                        "state": s.state,
-                    })
-
-        if rescued_count > 0:
-            total_dead = len(dead_candidates)
-            console.print(
-                f"[bold green]✓ Anti-DPI релей успешно оживил {rescued_count} из {total_dead} серверов![/bold green]"
-            )
-        else:
-            console.print(
-                "\n[yellow]⚠ Anti-DPI: стратегия не смогла оживить упавшие узлы (0 спасено).[/yellow]"
-            )
-            console.print(
-                "[bold cyan]Рекомендуется выполнить экспресс-калибровку (Уровень 2):[/bold cyan]\n"
-                "[bold white]  Дважды кликните 'calibrate_level2.cmd' в папке проекта[/bold white]\n"
-            )
-    except Exception as exc:
-        console.print(f"[yellow]Ошибка обработки результатов Stage 2: {exc}[/yellow]")
-    finally:
-        with contextlib.suppress(Exception):
-            result_path.unlink(missing_ok=True)
-
-    return rescued_count
-
-
-def _run_stage2_worker(task_file: Path, log_file: Path | None = None) -> int:
-    from .antidpi.elevation import TeeOutput
-    from .models import RESULT_DEAD, RESULT_OK
-
-    cm = TeeOutput(log_file) if log_file else contextlib.nullcontext()
-    with cm:
-        if not task_file.is_file():
-            print(f"Task file not found: {task_file}", file=sys.stderr)
-            return 1
-        try:
-            data = json.loads(task_file.read_text(encoding="utf-8"))
-        except Exception as exc:
-            print(f"Failed to read task file {task_file}: {exc}", file=sys.stderr)
-            return 1
-
-        cache_path = Path(data["cache_path"]) if data.get("cache_path") else default_cache_path()
-        cache = ResultCache(path=cache_path) if cache_path.is_file() else None
-
-        sb_exe = Path(data.get("sb_exe", ""))
-        xr_exe = Path(data.get("xr_exe", ""))
-
-        ctx = RuntimeContext(
-            agy_bin=data.get("agy_bin", ""),
-            agy_model=data.get("agy_model"),
-            agy_concurrency=int(data.get("agy_concurrency", 2)),
-            initial_circuit_breaker=None,
-            cache=cache,
-            cache_path=cache_path,
-            ttl_map={},
-            report_path=Path("dummy"),
-            import_path=Path("dummy"),
-            ver_sb="",
-            ver_xr="",
-            sb_exe=sb_exe,
-            xr_exe=xr_exe,
-            antidpi=True,
-            antidpi_strategy=data.get("antidpi_strategy"),
-            antidpi_port=int(data.get("antidpi_port", 10850)),
-            antidpi_limit=int(data.get("antidpi_limit", 0)),
-            isp=data.get("isp"),
-            use_geo_precheck=bool(data.get("use_geo_precheck", True)),
-            check_web=bool(data.get("check_web", False)),
-            jobs=int(data.get("jobs", 16)),
-        )
-
-        dead_candidates: list[Server] = []
-        for d in data.get("dead_candidates", []):
-            s = Server(
-                group_id=d.get("group_id", 0),
-                group_name=d.get("group_name", ""),
-                name=d.get("name", ""),
-                engine=d.get("engine", "sing-box"),
-                server=d.get("server", ""),
-                server_port=d.get("server_port", 443),
-                import_obj=d.get("import_obj", {}),
-                source=d.get("source", "db"),
-                result=RESULT_DEAD,
-            )
-            dead_candidates.append(s)
-
-        to_probe: list[Server] = []
-        _execute_antidpi_stage_core(
-            dead_candidates=dead_candidates,
-            to_probe=to_probe,
-            ctx=ctx,
-            timeouts=data.get("timeouts", {}),
-            print_timeout=data.get("print_timeout", AGY_PRINT_TIMEOUT_DEFAULT),
-            circuit_breaker=None,
-        )
-
-        result_path = Path(data["result_path"])
-        rescued_items = []
-        for s in dead_candidates:
-            if s.result == RESULT_OK:
-                rescued_items.append({
-                    "config_identity": s.config_identity,
-                    "cache_key": s.cache_key,
-                    "result": s.result,
-                    "country": s.country,
-                    "ip_out": s.ip_out,
-                    "country_code": s.country_code,
-                    "city": s.city,
-                    "org": s.org,
-                    "latency_ms": s.latency_ms,
-                    "note": s.note,
-                    "web_status": s.web_status,
-                    "ingress_country_code": s.ingress_country_code,
-                    "ingress_ip": s.ingress_ip,
-                    "antidpi_strategy": s.antidpi_strategy,
-                    "state": s.state,
-                })
-
-        result_path.write_text(
-            json.dumps({"rescued": rescued_items}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return 0
-
-
-def _execute_antidpi_stage_core(
-    dead_candidates: list[Server],
-    to_probe: list[Server],
-    ctx: RuntimeContext,
-    timeouts: dict[str, float],
-    print_timeout: str,
-    circuit_breaker: QuotaCircuitBreaker | None = None,
-) -> int:
-    from .antidpi.benchmark import apply_relay_detour, build_relay_detour, load_ratings, save_ratings
-    from .antidpi.catalogue import get_strategy_by_number
-    from .antidpi.engine import WinwsRunner, ensure_zapret_binaries
-    from .antidpi.isp import IspDetectionError, detect_current_isp
-    from .antidpi.relay import ZapretRelay
-    from .models import RESULT_DEAD, RESULT_OK, STATE_ACTIVE
-
-    if not dead_candidates:
-        return 0
-
-    try:
-        current_isp = detect_current_isp(explicit_override=ctx.isp)
-        ratings = load_ratings(isp_identity=current_isp)
-        isp_label = f"[{current_isp.display_name}]"
-    except IspDetectionError as err:
-        console.print(
-            f"[yellow]⚠ Stage 2 Anti-DPI пропущен: невозможно определить провайдера сети ({err}).[/yellow]"
-        )
-        return 0
-
-    strat_num = ctx.antidpi_strategy
-    if strat_num is None:
-        strat_num = (
-            ratings.best_strategy_number
-            if (ratings and ratings.best_strategy_number)
-            else 10  # Дефолтная доказанная стратегия обхода
-        )
-
-    strat = get_strategy_by_number(strat_num)
-    if not strat:
-        console.print(f"[yellow]Anti-DPI: стратегия S{strat_num:02d} не найдена в каталоге.[/yellow]")
-        return 0
-
-    try:
-        zapret_dir = ensure_zapret_binaries()
-    except Exception as exc:
-        console.print(f"[yellow]Anti-DPI: не удалось загрузить бинарники Zapret2 ({exc}). Пропуск Stage 2.[/yellow]")
-        return 0
-
-    batch_size = ANTIDPI_BATCH_SIZE
-    total_candidates = len(dead_candidates)
-    batches = [dead_candidates[i : i + batch_size] for i in range(0, total_candidates, batch_size)]
-    num_batches = len(batches)
-
-    console.print(
-        f"\n[bold cyan]Stage 2: Anti-DPI Релей {isp_label}[/bold cyan] "
-        f"(стратегия S{strat.number:02d} {strat.name[:35]}, "
-        f"узлов: {total_candidates}, пачек: {num_batches} по <={batch_size} IP, порт {ctx.antidpi_port})..."
-    )
-
-    relay_port = ctx.antidpi_port
-    rescued_count = 0
-    init_desc = f"Anti-DPI спасение [пачка 1/{num_batches}]" if num_batches > 1 else "Anti-DPI попытка спасения"
-    pbar = tqdm(
-        total=total_candidates,
-        desc=init_desc,
-        unit="srv",
-        dynamic_ncols=True,
-    )
-
-    concurrency = getattr(ctx, "agy_concurrency", 2)
-    agy_semaphore = threading.Semaphore(concurrency)
-    model = getattr(ctx, "agy_model", None)
-    registry = ProcessRegistry()
-    stop_event = threading.Event()
-
-    stage2_timeouts = dict(timeouts)
-    stage2_timeouts["probe"] = min(timeouts.get("probe", 10.0), 5.0)
-    stage2_timeouts["start"] = min(timeouts.get("start", 6.0), 4.0)
-
-    try:
-        with ZapretRelay(port=relay_port):
-            for b_idx, batch in enumerate(batches, start=1):
-                if stop_event.is_set():
-                    break
-                if num_batches > 1:
-                    pbar.set_description(f"Anti-DPI спасение [пачка {b_idx}/{num_batches}]")
-
-                batch_ips = {s.server for s in batch if s.server}
-                if not batch_ips:
-                    pbar.update(len(batch))
-                    continue
-
-                batch_ports_set = sorted({str(s.server_port) for s in batch if s.server_port})
-                batch_ports_str = ",".join(batch_ports_set[:16]) or "443"
-
-                with WinwsRunner(
-                    strategy=strat,
-                    target_ips=batch_ips,
-                    zapret_dir=zapret_dir,
-                    ports=batch_ports_str,
-                ):
-                    workers = min(len(batch), getattr(ctx, "jobs", 16), 16)
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                        futures = {}
-                        for s in batch:
-                            patched_obj = apply_relay_detour(s.import_obj, is_xray=(s.engine == "xray"))
-                            _, relay_outbound = build_relay_detour(
-                                is_xray=(s.engine == "xray"),
-                                relay_port=relay_port,
-                            )
-                            bin_path = str(ctx.xr_exe if s.engine == "xray" else ctx.sb_exe)
-                            fut = ex.submit(
-                                _probe_worker,
-                                bin_path,
-                                s.engine == "xray",
-                                patched_obj,
-                                stage2_timeouts,
-                                ctx.agy_bin,
-                                print_timeout,
-                                agy_model=model,
-                                agy_semaphore=agy_semaphore,
-                                circuit_breaker=circuit_breaker,
-                                stop_event=stop_event,
-                                registry=registry,
-                                use_geo_precheck=ctx.use_geo_precheck,
-                                check_web=ctx.check_web,
-                                extra_outbounds=[relay_outbound],
-                            )
-                            futures[fut] = s
-
-                        for fut in concurrent.futures.as_completed(futures):
-                            srv = futures[fut]
-                            if stop_event.is_set():
-                                break
-                            try:
-                                res = fut.result()
-                            except Exception as exc:
-                                res = {"result": RESULT_DEAD, "note": str(exc)}
-
-                            if res.get("result") == RESULT_OK:
-                                srv.result = RESULT_OK
-                                srv.country = res.get("country", "")
-                                srv.ip_out = res.get("ip_out", "")
-                                srv.country_code = res.get("country_code", "")
-                                srv.city = res.get("city", "")
-                                srv.org = res.get("org", "")
-                                srv.latency_ms = res.get("latency_ms", 0)
-                                srv.note = f"оживлен через Zapret S{strat.number:02d}"
-                                srv.web_status = res.get("web_status", "")
-                                srv.ingress_country_code = res.get("ingress_country_code", "")
-                                srv.ingress_ip = res.get("ingress_ip", "")
-                                srv.antidpi_strategy = strat.number
-                                srv.state = STATE_ACTIVE
-                                rescued_count += 1
-                                if srv not in to_probe:
-                                    to_probe.append(srv)
-                            pbar.update(1)
-
-                if b_idx < num_batches and not stop_event.is_set():
-                    time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        stop_event.set()
-        registry.kill_all()
-        console.print("\n[yellow]Stage 2 прерван пользователем.[/yellow]")
-    except Exception as exc:
-        console.print(f"[yellow]Ошибка работы Stage 2 Anti-DPI: {exc}[/yellow]")
-    finally:
-        pbar.close()
-
-    # Обновляем живой рейтинг на основе реального результата прогона
-    if ratings is not None and current_isp is not None:
-        ratings.record_live_feedback(strat.number, rescued_count, total_candidates)
-        save_ratings(ratings, isp_identity=current_isp)
-
-    if rescued_count > 0:
-        total_dead = total_candidates
-        console.print(
-            f"[bold green]✓ Anti-DPI релей успешно оживил {rescued_count} из {total_dead} серверов![/bold green]"
-        )
-    else:
-        console.print(
-            f"\n[yellow]⚠ Anti-DPI: текущая стратегия S{strat.number:02d} "
-            "не смогла оживить упавшие узлы (0 спасено).[/yellow]"
-        )
-        console.print(
-            "[bold cyan]Рекомендуется выполнить экспресс-калибровку (Уровень 2):[/bold cyan]\n"
-            "[bold white]  Дважды кликните 'calibrate_level2.cmd' в папке проекта[/bold white]\n"
-        )
-
-    return rescued_count
+    min_probed: int = MIN_PROBED_FOR_OUTAGE_GUARD,
+) -> bool:
+    """Выявляет тотальный сбой локальной сети: проверено >= min_probed узлов и 100% вернули DEAD."""
+    probed = [s for s in to_probe if s.result]
+    if len(probed) < min_probed:
+        return False
+    return all(s.result == RESULT_DEAD for s in probed)
 
 
 def _sync_and_save_cache(
@@ -1236,17 +820,37 @@ def _sync_and_save_cache(
     servers: list[Server],
     to_probe: list[Server],
     label: str = "",
-) -> None:
+) -> bool:
+    """Синхронизирует и сохраняет кэш. Возвращает True, если сработал предохранитель сбоя сети."""
     if not ctx.cache:
-        return
+        return False
     for s in servers:
         ctx.cache.enrich_from_server(s)
+
+    outage_detected = _is_mass_network_outage(to_probe)
+    if outage_detected:
+        console.print(
+            "[bold yellow]⚠️ Внимание: 100% проверенных серверов вернули DEAD. "
+            "Возможен обрыв локальной сети или активный мёртвый прокси — "
+            "штрафные баллы для ранее рабочих узлов в кэше не начислены.[/bold yellow]"
+        )
+
     for s in to_probe:
-        if s.result:
-            ctx.cache.update_from_server(s)
+        if not s.result:
+            continue
+        if outage_detected and s.result == RESULT_DEAD:
+            cur = ctx.cache.entries.get(s.cache_key) or ctx.cache.entries.get(s.host_port)
+            if cur and (
+                cur.get("state") in (STATE_ACTIVE, STATE_DEGRADED)
+                or cur.get("result") == RESULT_OK
+            ):
+                continue
+        ctx.cache.update_from_server(s)
+
     ctx.cache.save()
     suffix = f" ({label})" if label else ""
     console.print(f"[dim]Кэш сохранён{suffix}: {ctx.cache_path} (записей: {len(ctx.cache.entries)})[/dim]")
+    return outage_detected
 
 
 def _finalize_and_report(
@@ -1271,7 +875,13 @@ def _finalize_and_report(
             f"Последующие проверки agy пропущены, серверы протестированы по preflight/geo."
         )
 
-    _sync_and_save_cache(ctx, servers, to_probe)
+    outage_detected = _sync_and_save_cache(ctx, servers, to_probe)
+    if outage_detected:
+        warnings = list(warnings)
+        warnings.append(
+            "Все проверенные узлы вернули DEAD (возможен сбой локальной сети или родительского прокси). "
+            "Деградация ранее рабочих узлов в кэше была заблокирована предохранителем."
+        )
 
     cache_note = ""
     if ctx.cache:
@@ -1295,7 +905,12 @@ def _finalize_and_report(
         cached_unique_hosts=cached_unique_hosts,
         stats=stats,
     )
-    nb, nx = write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
+    nb, nx = write_import_file(
+        ctx.cache,
+        ctx.import_path,
+        fallback_servers=servers,
+        relay_port=ctx.antidpi_port,
+    )
 
     gist_res = None
     if ctx.gist_id:
@@ -1316,38 +931,22 @@ def _finalize_and_report(
     )
 
 
-def main() -> None:
-    load_dotenv()
-    args = build_arg_parser().parse_args()
-
-    if getattr(args, "stage2_worker", None):
-        rc = _run_stage2_worker(
-            task_file=Path(args.stage2_worker),
-            log_file=Path(args.log_output) if getattr(args, "log_output", None) else None,
-        )
-        sys.exit(rc)
-
-    if getattr(args, "clear_dead", False):
-        cache_path = Path(args.cache) if args.cache else default_cache_path()
-        if not cache_path.is_file():
-            console.print(f"[yellow]Файл кэша {cache_path} не найден.[/yellow]")
-            return
-        cache = ResultCache(path=cache_path)
-        removed = cache.clear_dead()
-        console.print(
-            f"[green]✓ Из кэша {cache_path.name} удалено {removed} записей со статусом DEAD. "
-            f"Осталось записей: {len(cache.entries)}.[/green]"
-        )
+def _run_clear_dead(args: argparse.Namespace) -> None:
+    cache_path = Path(args.cache) if getattr(args, "cache", None) else default_cache_path()
+    if not cache_path.is_file():
+        console.print(f"[yellow]Файл кэша {cache_path} не найден.[/yellow]")
         return
+    cache = ResultCache(path=cache_path)
+    removed = cache.clear_dead()
+    console.print(
+        f"[green]✓ Из кэша {cache_path.name} удалено {removed} записей со статусом DEAD. "
+        f"Осталось записей: {len(cache.entries)}.[/green]"
+    )
 
+
+def _run_probe_pipeline(args: argparse.Namespace, *, interactive_loop: bool = False) -> None:
     if args.throne_dir:
         set_throne_dir(args.throne_dir)
-
-    for stream in (sys.stdout, sys.stderr):
-        recfg = getattr(stream, "reconfigure", None)
-        if recfg is not None:
-            with contextlib.suppress(ValueError):
-                recfg(encoding="utf-8", errors="replace")
 
     ctx = _setup_environment(args)
 
@@ -1357,11 +956,16 @@ def main() -> None:
 
     selection = _collect_and_select_servers(args, groups, ctx.cache, ctx.ttl_map)
     if selection is None:
-        print("Ничего не выбрано — выход.")
-        pause_on_exit(args.no_pause)
+        console.print("Ничего не выбрано.")
+        if not interactive_loop:
+            pause_on_exit(args.no_pause)
         return
 
-    servers, to_probe, cached_counts, cached_unique_hosts, warnings = selection
+    servers = selection.servers
+    to_probe = selection.to_probe
+    cached_counts = selection.cached_counts
+    cached_unique_hosts = selection.cached_unique_hosts
+    warnings = selection.warnings
     timeouts = {
         "start": min(args.timeout, 12.0),
         "preflight": args.preflight_timeout,
@@ -1370,7 +974,6 @@ def main() -> None:
         "geo": min(args.timeout, 10.0),
         "web_check": 3.5,
     }
-    # Синхронизировать print-timeout agy с таймаутом проверки, если не задан явно
     print_timeout = args.print_timeout
     if print_timeout == AGY_PRINT_TIMEOUT_DEFAULT and args.timeout != 35.0:
         print_timeout = f"{int(args.timeout)}s"
@@ -1388,14 +991,20 @@ def main() -> None:
         cached_unique_hosts=cached_unique_hosts,
     )
 
-    # Упреждающее сохранение результатов прямой проверки (Stage 1) до старта Anti-DPI
+    pre_sync_entries = copy.deepcopy(ctx.cache.entries) if ctx.cache is not None else None
+
     _sync_and_save_cache(ctx, servers, to_probe, label="Stage 1")
     if ctx.import_path and ctx.cache:
         with contextlib.suppress(Exception):
-            write_import_file(ctx.cache, ctx.import_path, fallback_servers=servers)
+            write_import_file(
+                ctx.cache,
+                ctx.import_path,
+                fallback_servers=servers,
+                relay_port=ctx.antidpi_port,
+            )
 
     if not interrupted and ctx.antidpi:
-        _execute_antidpi_stage(
+        execute_antidpi_stage(
             servers=servers,
             to_probe=to_probe,
             ctx=ctx,
@@ -1405,6 +1014,9 @@ def main() -> None:
         )
 
     dt = time.time() - t0
+
+    if ctx.cache is not None and pre_sync_entries is not None:
+        ctx.cache.entries = pre_sync_entries
 
     _finalize_and_report(
         ctx=ctx,
@@ -1419,9 +1031,104 @@ def main() -> None:
     )
 
     if interrupted:
-        sys.exit(130)
+        if not interactive_loop:
+            sys.exit(130)
+        return
 
-    pause_on_exit(args.no_pause)
+    if not interactive_loop:
+        pause_on_exit(args.no_pause)
+
+
+def _has_direct_cli_mode(args: argparse.Namespace, raw_argv: list[str]) -> bool:
+    """Определяет, передан ли явный режим запуска через аргументы CLI."""
+    if (
+        getattr(args, "clear_dead", False)
+        or getattr(args, "update_catalogue", False)
+        or getattr(args, "serve", False)
+        or getattr(args, "stop_relay", False)
+        or getattr(args, "status_relay", False)
+        or getattr(args, "calibrate", None) is not None
+        or getattr(args, "group", None)
+        or getattr(args, "subset", 0) > 0
+        or getattr(args, "refresh_cache", False)
+        or getattr(args, "refresh_dead", False)
+    ):
+        return True
+    return bool(raw_argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    disable_quick_edit_mode()
+    load_dotenv()
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = build_arg_parser().parse_args(raw_argv)
+
+    for stream in (sys.stdout, sys.stderr):
+        recfg = getattr(stream, "reconfigure", None)
+        if recfg is not None:
+            with contextlib.suppress(ValueError):
+                recfg(encoding="utf-8", errors="replace")
+
+    if getattr(args, "stage2_worker", None):
+        rc = run_stage2_worker(
+            task_file=Path(args.stage2_worker),
+            log_file=Path(args.log_output) if getattr(args, "log_output", None) else None,
+        )
+        sys.exit(rc)
+
+    if getattr(args, "clear_dead", False):
+        _run_clear_dead(args)
+        return 0
+
+    if getattr(args, "status_relay", False):
+        return print_relay_status(args)
+
+    if getattr(args, "stop_relay", False):
+        return stop_relay_service(args)
+
+    if getattr(args, "update_catalogue", False):
+        rc = run_catalogue_update()
+        if rc != 0:
+            sys.exit(rc)
+        return rc
+
+    if getattr(args, "calibrate", None) is not None:
+        return run_calibration(args)
+
+    if getattr(args, "serve", False):
+        return run_relay_service(args)
+
+    if _has_direct_cli_mode(args, raw_argv) or not (sys.stdin and sys.stdin.isatty()):
+        _run_probe_pipeline(args, interactive_loop=False)
+        return 0
+
+    # Интерактивный цикл главного меню TUI (при запуске run.cmd / pxp без аргументов)
+    while True:
+        try:
+            action = select_main_action_interactive(relay_port=args.antidpi_port)
+        except TypeError:
+            action = select_main_action_interactive()
+        if action == "exit":
+            break
+        if action == "probe":
+            _run_probe_pipeline(args, interactive_loop=True)
+        elif action == "serve":
+            args.detach = True
+            run_relay_service(args)
+            args.detach = False
+        elif action == "stop_relay":
+            stop_relay_service(args)
+        elif action == "calibrate":
+            lvl = select_calibration_level_interactive()
+            if lvl is not None:
+                args.calibrate = lvl
+                run_calibration(args)
+                args.calibrate = None
+        elif action == "update_catalogue":
+            run_catalogue_update()
+        elif action == "clear_dead":
+            _run_clear_dead(args)
+    return 0
 
 
 def cli_entrypoint() -> None:

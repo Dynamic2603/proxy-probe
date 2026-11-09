@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .antidpi.models import AntidpiBenchmarkResult, CalibrationLevelConfig
     from .gist import GistSyncResult
 
 from rich.console import Console
@@ -71,6 +71,189 @@ def format_live_counters(counts: dict[str, int]) -> str:
     return " | ".join(f"{k}: {counts.get(k, 0)}" for k in order)
 
 
+def select_main_action_interactive(relay_port: int = 10850) -> str:
+    """Отображает главное интерактивное меню TUI proxy-probe с адаптивным статусом релея (SSOT)."""
+    if not sys.stdin or not sys.stdin.isatty():
+        return "probe"
+
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
+
+    from .antidpi.runner import is_relay_running, load_relay_state
+
+    relay_active = is_relay_running(port=relay_port)
+    if relay_active:
+        st = load_relay_state()
+        strat_hint = f", S{st.strategy_number:02d}" if st else ""
+        relay_choice = Choice(
+            value="stop_relay",
+            name=f"2. Остановить фоновый релей Zapret2 [● Работает на 127.0.0.1:{relay_port}{strat_hint}]",
+        )
+    else:
+        relay_choice = Choice(
+            value="serve",
+            name=f"2. Запустить фоновый релей Zapret2 (SOCKS5 127.0.0.1:{relay_port}) [○ Остановлен]",
+        )
+
+    choices = [
+        Choice(
+            value="probe",
+            name="1. Проверить и обновить пул прокси (Stage 0 TCP -> Stage 1 Direct -> Stage 2 Anti-DPI)",
+        ),
+        relay_choice,
+        Choice(
+            value="calibrate",
+            name="3. Калибровать стратегии обхода DPI под текущего провайдера",
+        ),
+        Choice(
+            value="update_catalogue",
+            name="4. Обновить каталог стратегий Anti-DPI из upstream (484 профиля)",
+        ),
+        Choice(
+            value="clear_dead",
+            name="5. Очистить кэш results.json от нерабочих записей (DEAD)",
+        ),
+        Choice(
+            value="exit",
+            name="0. Выход",
+        ),
+    ]
+    try:
+        console.print()
+        selected = inquirer.select(
+            message="Выберите действие proxy-probe (pxp):",
+            choices=choices,
+            cycle=True,
+        ).execute()
+        return str(selected) if selected else "exit"
+    except (EOFError, KeyboardInterrupt):
+        return "exit"
+
+
+def select_calibration_level_interactive() -> int | None:
+    """Отображает интерактивное подменю выбора уровня калибровки Anti-DPI."""
+    if not sys.stdin or not sys.stdin.isatty():
+        return 2
+
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
+
+    choices = [
+        Choice(
+            value=2,
+            name="Уровень 2: Экспресс-калибровка разнообразия механик (~20–25 стратегий, ~1.5 мин)",
+        ),
+        Choice(
+            value=3,
+            name="Уровень 3: Расширенная калибровка лидеров на пуле живых серверов (~4–5 мин)",
+        ),
+        Choice(
+            value=4,
+            name="Уровень 4: Глубокий перебор всех 484 стратегий каталога (~20–25 мин)",
+        ),
+        Choice(
+            value=0,
+            name="← Назад в главное меню",
+        ),
+    ]
+    try:
+        selected = inquirer.select(
+            message="Выберите уровень калибровки Anti-DPI:",
+            choices=choices,
+            cycle=True,
+        ).execute()
+        return int(selected) if selected and int(selected) in (2, 3, 4) else None
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def print_benchmark_results_panel(
+    living: AntidpiBenchmarkResult,
+    selected: list[Server],
+    server_rescue_map: dict[str, list[tuple[int, int]]],
+    cfg: CalibrationLevelConfig,
+) -> None:
+    """Выводит сводную таблицу и панель вердикта калибровки Anti-DPI в едином стиле Rich."""
+    table = Table(
+        title=f"Живой рейтинг Anti-DPI стратегий ({living.isp or 'Default'}, {living.tested_at[:19]})",
+        header_style="bold magenta",
+        expand=True,
+    )
+    table.add_column("№", width=8)
+    table.add_column("Стратегия", style="bold white", ratio=1, overflow="ellipsis", no_wrap=True)
+    table.add_column("Механика", style="cyan", width=24, overflow="ellipsis", no_wrap=True)
+    table.add_column("Статус", justify="center", width=12)
+    table.add_column("Спасено", justify="right", width=10)
+    table.add_column("Успех", justify="right", width=8)
+    table.add_column("Задержка", justify="right", width=10)
+    table.add_column("Скор", justify="right", width=6)
+
+    for r in living.ratings[:25]:
+        is_best = r.strategy_number == living.best_strategy_number
+        mark = "⭐ " if is_best else ""
+        pct = f"{int(r.success_rate * 100)}%"
+        lat = format_latency(r.avg_latency_ms)
+        table.add_row(
+            f"{mark}S{r.strategy_number:02d}",
+            r.strategy_name[:40],
+            r.technical_family[:24],
+            r.status_badge,
+            f"{r.rescued_count}/{r.total_tested}",
+            pct,
+            lat,
+            str(r.score),
+        )
+    console.print()
+    console.print(table)
+
+    summary_lines: list[str] = []
+    if server_rescue_map:
+        summary_lines.append("[bold cyan]Спасённые серверы и эффективные стратегии:[/bold cyan]")
+        for srv in selected:
+            if srv.server in server_rescue_map:
+                res_list = server_rescue_map[srv.server]
+                res_str = ", ".join(f"S{num:02d} ({lat} мс)" for num, lat in res_list[:6])
+                best_s = min(res_list, key=lambda x: x[1])
+                summary_lines.append(
+                    f"  • [bold white]{srv.host_port}[/bold white] ({srv.name[:30]}): "
+                    f"{res_str} -> лучшая [green]S{best_s[0]:02d}[/green]"
+                )
+        summary_lines.append("")
+
+    best_num = living.best_strategy_number
+    best_entry = next((r for r in living.ratings if r.strategy_number == best_num), None) if best_num else None
+
+    if best_entry and best_entry.score > 0:
+        summary_lines.append(
+            f"[bold green]✓ Рекомендуемая стратегия для провайдера {living.isp}: "
+            f"S{best_num:02d} ({best_entry.strategy_name})[/bold green]"
+        )
+        summary_lines.append("[dim]Живой рейтинг сохранён в data/antidpi_ratings.json.[/dim]")
+    else:
+        summary_lines.append(
+            f"[bold yellow]⚠ Ни одна из проверенных стратегий не оживила узлы ({cfg.title}).[/bold yellow]"
+        )
+        if cfg.next_level:
+            summary_lines.append(
+                f"Рекомендуется запустить следующий уровень калибровки: "
+                f"[bold cyan]Уровень {cfg.next_level}[/bold cyan] "
+                f"(или: [bold white]uv run pxp --calibrate {cfg.next_level}[/bold white])"
+            )
+        else:
+            summary_lines.append(
+                "[red]Все 484 стратегии каталога дали 0% успеха. "
+                "ТСПУ провайдера полностью блокирует протокол либо целевые серверы недоступны.[/red]"
+            )
+
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="[bold]Вердикт калибровки Anti-DPI[/bold]",
+            border_style="cyan",
+        )
+    )
+
+
 def select_groups_interactive(groups: list[dict[str, Any]], counts: dict[int, int]) -> set[int]:
     if not sys.stdin or not sys.stdin.isatty():
         return {g["id"] for g in groups}
@@ -95,24 +278,6 @@ def select_groups_interactive(groups: list[dict[str, Any]], counts: dict[int, in
         return set(selected) if selected else set()
     except (EOFError, KeyboardInterrupt):
         return set()
-
-
-def print_progress_row(server: Server, idx: int, total: int, write_fn: Callable[[str], None] | None = None) -> None:
-    res_badge = format_result(server.result)
-    ms_txt = format_latency(server.latency_ms)
-    country = server.country or "-"
-    note_hint = f" ({server.note[:35]})" if server.note and server.result != RESULT_OK else ""
-    line = (
-        f"  [cyan][{idx:>2}/{total}][/cyan] {res_badge:20s} "
-        f"[bold white]{server.host_port:<24}[/bold white] "
-        f"{country:<16} {ms_txt:<12} [dim]{server.name[:30]}{note_hint}[/dim]"
-    )
-    if write_fn is not None:
-        with console.capture() as cap:
-            console.print(line)
-        write_fn(cap.get().rstrip("\r\n"))
-    else:
-        console.print(line)
 
 
 def print_results_table(

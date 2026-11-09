@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from conftest import make_runtime_context
 from tqdm import tqdm
 
 from proxy_probe.cli import _execute_probe_pool, build_arg_parser
@@ -25,13 +26,6 @@ def test_execute_probe_pool_interrupted() -> None:
         for i in range(5)
     ]
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = False
-        initial_circuit_breaker = None
-
     def mock_as_completed(futures):
         raise KeyboardInterrupt()
 
@@ -40,7 +34,7 @@ def test_execute_probe_pool_interrupted() -> None:
             to_probe=servers,
             jobs=2,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=False),
             print_timeout="5s",
         )
 
@@ -62,13 +56,6 @@ def test_execute_probe_pool_success_with_cached_counts() -> None:
         )
     ]
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = False
-        initial_circuit_breaker = None
-
     mock_result = {
         "result": "AGY-OK",
         "country": "US",
@@ -82,7 +69,7 @@ def test_execute_probe_pool_success_with_cached_counts() -> None:
             to_probe=servers,
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=False),
             print_timeout="5s",
             cached_counts={"AGY-OK": 32, "AGY-BLOCK": 5},
         )
@@ -104,15 +91,6 @@ def test_execute_probe_pool_stage0_dead_filtered() -> None:
         source="fresh",
     )
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = True
-        tcp_timeout = 1.0
-        tcp_concurrency = 10
-        initial_circuit_breaker = None
-
     mock_tcp_results = {
         ("192.0.2.1", 443): (False, 0, "tcp: таймаут соединения (хост не отвечает)"),
     }
@@ -125,7 +103,7 @@ def test_execute_probe_pool_stage0_dead_filtered() -> None:
             to_probe=[server],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=True),
             print_timeout="5s",
         )
 
@@ -149,15 +127,6 @@ def test_execute_probe_pool_stage0_alive_passed_to_engine() -> None:
         source="fresh",
     )
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = True
-        tcp_timeout = 1.0
-        tcp_concurrency = 10
-        initial_circuit_breaker = None
-
     mock_tcp_results = {
         ("1.1.1.1", 443): (True, 50, ""),
     }
@@ -177,7 +146,7 @@ def test_execute_probe_pool_stage0_alive_passed_to_engine() -> None:
             to_probe=[server],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=True),
             print_timeout="5s",
         )
 
@@ -220,13 +189,6 @@ def test_execute_probe_pool_engine_counters_isolated_from_cache() -> None:
         source="fresh",
     )
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = False
-        initial_circuit_breaker = None
-
     mock_result = {
         "result": RESULT_OK,
         "country": "US",
@@ -250,7 +212,7 @@ def test_execute_probe_pool_engine_counters_isolated_from_cache() -> None:
             to_probe=[server],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=False),
             print_timeout="5s",
             cached_counts={"AGY-OK": 50, "DEAD": 100},
         )
@@ -285,15 +247,6 @@ def test_execute_probe_pool_stage0_log_semantics() -> None:
         source="fresh",
     )
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = True
-        tcp_timeout = 1.0
-        tcp_concurrency = 10
-        initial_circuit_breaker = None
-
     mock_tcp_results = {
         ("10.0.0.1", 443): (False, 0, "tcp: таймаут"),
     }
@@ -307,7 +260,7 @@ def test_execute_probe_pool_stage0_log_semantics() -> None:
             to_probe=[s1, s2],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=True),
             print_timeout="5s",
         )
 
@@ -330,14 +283,6 @@ def test_execute_probe_pool_representative_filter_dead() -> None:
     s2 = Server(1, "g", "s2", "sing-box", "1.2.3.4", 443, {}, "fresh")
     s3 = Server(1, "g", "s3", "sing-box", "1.2.3.4", 443, {}, "fresh")
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = False
-        use_rep_filter = True
-        initial_circuit_breaker = None
-
     mock_dead_result = {
         "result": RESULT_DEAD,
         "country": "",
@@ -351,7 +296,7 @@ def test_execute_probe_pool_representative_filter_dead() -> None:
             to_probe=[s1, s2, s3],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=False, use_rep_filter=True),
             print_timeout="5s",
         )
 
@@ -370,14 +315,6 @@ def test_execute_probe_pool_representative_filter_alive() -> None:
     s1 = Server(1, "g", "s1", "sing-box", "1.2.3.4", 443, {}, "fresh")
     s2 = Server(1, "g", "s2", "sing-box", "1.2.3.4", 443, {}, "fresh")
 
-    class FakeCtx:
-        xr_exe = "fake_xr"
-        sb_exe = "fake_sb"
-        agy_bin = "fake_agy"
-        use_tcp_prefilter = False
-        use_rep_filter = True
-        initial_circuit_breaker = None
-
     mock_ok_result = {
         "result": RESULT_OK,
         "country": "US",
@@ -391,7 +328,7 @@ def test_execute_probe_pool_representative_filter_alive() -> None:
             to_probe=[s1, s2],
             jobs=1,
             timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
-            ctx=FakeCtx(),  # type: ignore[arg-type]
+            ctx=make_runtime_context(use_tcp_prefilter=False, use_rep_filter=True),
             print_timeout="5s",
         )
 
@@ -492,24 +429,9 @@ def test_setup_environment_antidpi_flags() -> None:
 
 
 def test_execute_antidpi_stage_disabled() -> None:
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=False,
-    )
+    ctx = make_runtime_context(antidpi=False)
     s = Server(
         group_id=1,
         group_name="Test",
@@ -521,32 +443,16 @@ def test_execute_antidpi_stage_disabled() -> None:
         source="fresh",
         result=RESULT_DEAD,
     )
-    rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+    rescued = execute_antidpi_stage([s], [s], ctx, {}, "5s")
     assert rescued == 0
     assert s.result == RESULT_DEAD
 
 
 def test_execute_antidpi_stage_rescues_dead() -> None:
     from proxy_probe.antidpi.models import StrategyProfile
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=True,
-        antidpi_strategy=1,
-    )
+    ctx = make_runtime_context(antidpi=True, antidpi_strategy=1)
     s = Server(
         group_id=1,
         group_name="Test",
@@ -583,12 +489,12 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
          patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
          patch("proxy_probe.antidpi.engine.WinwsRunner") as mock_runner, \
          patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
-         patch("proxy_probe.cli._probe_worker", return_value=mock_res):
+         patch("proxy_probe.antidpi.stage2._probe_worker", return_value=mock_res):
         mock_relay.return_value.__enter__.return_value = None
         mock_runner.return_value.__enter__.return_value = None
 
         to_probe: list[Server] = []
-        rescued = _execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
+        rescued = execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
 
     assert rescued == 1
     assert s.result == RESULT_OK
@@ -598,25 +504,9 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
 
 
 def test_execute_antidpi_stage_no_elevate() -> None:
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=True,
-        no_elevate=True,
-    )
+    ctx = make_runtime_context(antidpi=True, no_elevate=True)
     s = Server(
         group_id=1,
         group_name="Test",
@@ -629,31 +519,15 @@ def test_execute_antidpi_stage_no_elevate() -> None:
         result=RESULT_DEAD,
     )
     with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False):
-        rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+        rescued = execute_antidpi_stage([s], [s], ctx, {}, "5s")
     assert rescued == 0
     assert s.result == RESULT_DEAD
 
 
 def test_execute_antidpi_stage_uac_cancelled() -> None:
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=True,
-        no_elevate=False,
-    )
+    ctx = make_runtime_context(antidpi=True, no_elevate=False)
     s = Server(
         group_id=1,
         group_name="Test",
@@ -671,7 +545,7 @@ def test_execute_antidpi_stage_uac_cancelled() -> None:
 
     with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
          patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=mock_run_elevated):
-        rescued = _execute_antidpi_stage([s], [s], ctx, {}, "5s")
+        rescued = execute_antidpi_stage([s], [s], ctx, {}, "5s")
 
     assert rescued == 0
     assert s.result == RESULT_DEAD
@@ -680,22 +554,10 @@ def test_execute_antidpi_stage_uac_cancelled() -> None:
 def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
     import json
 
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
+    ctx = make_runtime_context(
         cache_path=tmp_path / "results.json",
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
         antidpi=True,
         no_elevate=False,
     )
@@ -712,7 +574,6 @@ def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
     )
 
     def fake_run_elevated(executable, params, cwd):
-        # Эмулируем запись результата воркером
         for part in params.split():
             if "stage2_task_" in part and part.endswith(".json"):
                 task_file = Path(part)
@@ -738,7 +599,7 @@ def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
     to_probe: list[Server] = []
     with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
          patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=fake_run_elevated):
-        rescued = _execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
+        rescued = execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
 
     assert rescued == 1
     assert s.result == RESULT_OK
@@ -749,8 +610,6 @@ def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
 
 
 def test_sync_and_save_cache_flushes_to_disk(tmp_path: Path) -> None:
-    import types
-
     from proxy_probe.cache import ResultCache
     from proxy_probe.cli import _sync_and_save_cache
 
@@ -769,7 +628,7 @@ def test_sync_and_save_cache_flushes_to_disk(tmp_path: Path) -> None:
         country_code="DE",
     )
 
-    dummy_ctx = types.SimpleNamespace(cache=cache, cache_path=cache_file)
+    dummy_ctx = make_runtime_context(cache=cache, cache_path=cache_file)
     _sync_and_save_cache(dummy_ctx, [s], [s], label="Stage 1")
 
     assert cache_file.is_file()
@@ -812,11 +671,10 @@ def test_collect_and_select_servers_refresh_dead() -> None:
             args=args_default, groups=[{"id": 1, "name": "g"}], cache=mock_cache, ttl_map={}
         )
         assert res1 is not None
-        _servers1, to_probe, cached_counts, _, _ = res1
-        assert len(to_probe) == 0
-        assert cached_counts.get(RESULT_OK) == 1
-        assert cached_counts.get(RESULT_BLOCK) == 1
-        assert cached_counts.get(RESULT_DEAD) == 1
+        assert len(res1.to_probe) == 0
+        assert res1.cached_counts.get(RESULT_OK) == 1
+        assert res1.cached_counts.get(RESULT_BLOCK) == 1
+        assert res1.cached_counts.get(RESULT_DEAD) == 1
 
         # Case 2: с --refresh-dead — DEAD сервер отправляется на перепроверку
         s_ok.result = ""
@@ -827,12 +685,11 @@ def test_collect_and_select_servers_refresh_dead() -> None:
             args=args_refresh, groups=[{"id": 1, "name": "g"}], cache=mock_cache, ttl_map={}
         )
         assert res2 is not None
-        _servers2, to_probe, cached_counts, _, _ = res2
-        assert len(to_probe) == 1
-        assert to_probe[0].server == "3.3.3.3"
-        assert cached_counts.get(RESULT_OK) == 1
-        assert cached_counts.get(RESULT_BLOCK) == 1
-        assert cached_counts.get(RESULT_DEAD) is None
+        assert len(res2.to_probe) == 1
+        assert res2.to_probe[0].server == "3.3.3.3"
+        assert res2.cached_counts.get(RESULT_OK) == 1
+        assert res2.cached_counts.get(RESULT_BLOCK) == 1
+        assert res2.cached_counts.get(RESULT_DEAD) is None
 
 
 def test_cli_antidpi_limit_flag() -> None:
@@ -859,26 +716,9 @@ def test_setup_environment_antidpi_limit() -> None:
 
 
 def test_execute_antidpi_stage_honors_limit() -> None:
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=True,
-        antidpi_limit=50,
-    )
-    # Создаем 80 серверов с уникальными IP
+    ctx = make_runtime_context(antidpi=True, antidpi_limit=50)
     servers = [
         Server(
             group_id=1,
@@ -895,44 +735,24 @@ def test_execute_antidpi_stage_honors_limit() -> None:
     ]
 
     with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
-         patch("proxy_probe.cli._execute_antidpi_stage_core", return_value=0) as mock_core:
-        _execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
-        # Должны быть переданы ровно 50 из-за antidpi_limit=50
+         patch("proxy_probe.antidpi.stage2.execute_antidpi_stage_core", return_value=0) as mock_core:
+        execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
         passed_candidates = mock_core.call_args[1]["dead_candidates"]
         assert len(passed_candidates) == 50
 
-    # Проверяем, что при antidpi_limit=0 берутся все 80
     ctx.antidpi_limit = 0
     with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
-         patch("proxy_probe.cli._execute_antidpi_stage_core", return_value=0) as mock_core:
-        _execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
+         patch("proxy_probe.antidpi.stage2.execute_antidpi_stage_core", return_value=0) as mock_core:
+        execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
         passed_candidates = mock_core.call_args[1]["dead_candidates"]
         assert len(passed_candidates) == 80
 
 
 def test_execute_antidpi_stage_multi_batch() -> None:
     from proxy_probe.antidpi.models import StrategyProfile
-    from proxy_probe.cli import RuntimeContext, _execute_antidpi_stage
+    from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
-    ctx = RuntimeContext(
-        agy_bin="fake",
-        agy_model=None,
-        agy_concurrency=2,
-        initial_circuit_breaker=None,
-        cache=None,
-        cache_path=Path("fake"),
-        ttl_map={},
-        report_path=Path("fake"),
-        import_path=Path("fake"),
-        ver_sb="1.0",
-        ver_xr="1.0",
-        sb_exe=Path("sb"),
-        xr_exe=Path("xr"),
-        antidpi=True,
-        antidpi_strategy=1,
-        antidpi_limit=0,
-    )
-    # Создаем 350 серверов (пачки: 150 + 150 + 50)
+    ctx = make_runtime_context(antidpi=True, antidpi_strategy=1, antidpi_limit=0)
     servers = [
         Server(
             group_id=1,
@@ -976,7 +796,7 @@ def test_execute_antidpi_stage_multi_batch() -> None:
         def __enter__(self):
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *_args: object) -> None:
             pass
 
     with patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
@@ -984,11 +804,11 @@ def test_execute_antidpi_stage_multi_batch() -> None:
          patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
          patch("proxy_probe.antidpi.engine.WinwsRunner", side_effect=MockRunner), \
          patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
-         patch("proxy_probe.cli._probe_worker", return_value=mock_res):
+         patch("proxy_probe.antidpi.stage2._probe_worker", return_value=mock_res):
         mock_relay.return_value.__enter__.return_value = None
 
         to_probe: list[Server] = []
-        rescued = _execute_antidpi_stage(servers, to_probe, ctx, {}, "5s")
+        rescued = execute_antidpi_stage(servers, to_probe, ctx, {}, "5s")
 
     assert rescued == 350
     # ZapretRelay должен быть создан ровно 1 раз
@@ -1023,6 +843,130 @@ def test_cli_clear_dead_flag(tmp_path: Path) -> None:
     assert len(reloaded.entries) == 1
     assert "ok" in reloaded.entries
     assert "dead" not in reloaded.entries
+
+
+def test_execute_probe_pool_rep_filter_bypassed_when_tcp_prefilter_enabled() -> None:
+    s1 = Server(1, "g", "s1", "sing-box", "1.2.3.4", 443, {"type": "vless", "uuid": "u1"}, "fresh")
+    s2 = Server(1, "g", "s2", "sing-box", "1.2.3.4", 443, {"type": "vless", "uuid": "u2"}, "fresh")
+
+    mock_tcp_results = {("1.2.3.4", 443): (True, 40, "")}
+    worker_results = [
+        {"result": RESULT_DEAD, "country": "", "ip_out": "", "latency_ms": 0, "note": "preflight drop"},
+        {"result": RESULT_OK, "country": "DE", "ip_out": "1.2.3.4", "latency_ms": 95, "note": "ok"},
+    ]
+
+    with (
+        patch("proxy_probe.cli.batch_probe_tcp", return_value=mock_tcp_results),
+        patch("proxy_probe.cli._probe_worker", side_effect=worker_results) as mock_worker,
+    ):
+        completed, interrupted = _execute_probe_pool(
+            to_probe=[s1, s2],
+            jobs=1,
+            timeouts={"start": 1.0, "probe": 1.0, "geo": 1.0},
+            ctx=make_runtime_context(use_tcp_prefilter=True, use_rep_filter=True),
+            print_timeout="5s",
+        )
+
+    assert interrupted is False
+    assert completed == 2
+    assert mock_worker.call_count == 2
+    assert s1.result == RESULT_DEAD
+    assert s2.result == RESULT_OK
+
+
+def test_sync_and_save_cache_mass_outage_guard(tmp_path: Path) -> None:
+    from proxy_probe.cache import ResultCache
+    from proxy_probe.cli import _sync_and_save_cache
+    from proxy_probe.models import STATE_ACTIVE
+
+    cache_file = tmp_path / "results.json"
+    cache = ResultCache(path=cache_file)
+
+    servers = [
+        Server(
+            group_id=1,
+            group_name="G",
+            name=f"s{i}",
+            engine="sing-box",
+            server=f"10.0.0.{i}",
+            server_port=443,
+            import_obj={"server": f"10.0.0.{i}", "server_port": 443},
+            source="fresh",
+            result=RESULT_OK,
+            latency_ms=80,
+        )
+        for i in range(1, 7)
+    ]
+    for s in servers:
+        cache.update_from_server(s)
+    cache.save()
+
+    # Имитируем локальный обрыв сети: все 6 серверов вернули DEAD
+    for s in servers:
+        s.result = RESULT_DEAD
+        s.note = "tcp: таймаут"
+
+    ctx = make_runtime_context(cache=cache, cache_path=cache_file)
+    outage = _sync_and_save_cache(ctx, servers, servers)
+    assert outage is True
+
+    # Ранее активные серверы в кэше не должны были получить consecutive_fails = 1
+    for s in servers:
+        rec = cache.entries[s.cache_key]
+        assert rec["state"] == STATE_ACTIVE
+        assert rec["consecutive_fails"] == 0
+        assert rec["score"] == 70
+
+
+def test_run_serve_fails_fast_on_isp_detection_error(monkeypatch) -> None:
+    from proxy_probe.antidpi.isp import IspDetectionError
+    from proxy_probe.cli import main
+
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: True)
+
+    def _raise_isp_err(**_kw: object) -> None:
+        raise IspDetectionError("network unreachable")
+
+    monkeypatch.setattr("proxy_probe.antidpi.runner.detect_current_isp", _raise_isp_err)
+    rc = main(["--serve", "--no-elevate"])
+    assert rc == 1
+
+
+def test_main_interactive_tui_loop(monkeypatch) -> None:
+    from proxy_probe.cli import main
+
+    actions = iter(["update_catalogue", "exit"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("proxy_probe.cli.select_main_action_interactive", lambda: next(actions))
+
+    called: list[str] = []
+
+    def _mock_update() -> int:
+        called.append("update")
+        return 0
+
+    monkeypatch.setattr("proxy_probe.cli.run_catalogue_update", _mock_update)
+
+    rc = main([])
+    assert rc == 0
+    assert called == ["update"]
+
+
+def test_chunk_candidates_by_limits_ports_and_ips() -> None:
+    from proxy_probe.antidpi.stage2 import chunk_candidates_by_limits
+
+    # 25 серверов, у каждого свой уникальный порт (443..467)
+    servers = [
+        Server(1, "G", f"s{i}", "sing-box", f"10.0.0.{i}", 443 + i, {}, "fresh", result=RESULT_DEAD)
+        for i in range(25)
+    ]
+    batches = chunk_candidates_by_limits(servers, max_ips=150, max_ports=16)
+    assert len(batches) == 2
+    assert len(batches[0]) == 16
+    assert len(batches[1]) == 9
+    for b in batches:
+        ports_in_batch = {s.server_port for s in b}
+        assert len(ports_in_batch) <= 16
 
 
 

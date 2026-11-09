@@ -12,15 +12,30 @@ import threading
 import time
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .parsers import USER_AGENT
+from .ui import console
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedEngine:
+    zip_path: Path
+    version: str
 
 SINGBOX_REPO = "SagerNet/sing-box"
 XRAY_REPO = "XTLS/Xray-core"
 DEFAULT_SINGBOX_VERSION = "1.14.1"
 DEFAULT_XRAY_VERSION = "26.9.9"
+
+_PROXY_ENV_KEYS = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+
+
+def clean_proxy_env() -> dict[str, str]:
+    """Возвращает копию окружения ОС без системных прокси-переменных (SSOT)."""
+    return {k: v for k, v in os.environ.items() if k.lower() not in _PROXY_ENV_KEYS}
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -47,7 +62,8 @@ def extract_sha256_from_text(text: str, asset_name: str = "") -> str | None:
         return m.group(1).lower()
     all_hashes = re.findall(r"\b[a-fA-F0-9]{64}\b", text)
     if len(all_hashes) == 1:
-        return all_hashes[0].lower()
+        (single_hash,) = all_hashes
+        return single_hash.lower()
     return None
 
 
@@ -81,19 +97,23 @@ def fetch_upstream_sha256(repo: str, tag: str, asset_name: str, timeout: float =
 def verify_file_against_upstream(file_path: Path, repo: str, tag: str, asset_name: str) -> bool:
     expected_sha = fetch_upstream_sha256(repo, tag, asset_name)
     if not expected_sha:
-        print(f"  {asset_name}: upstream ({repo} {tag}) не публикует контрольную сумму, проверка пропущена")
+        console.print(
+            f"  [dim]{asset_name}: upstream ({repo} {tag}) не публикует контрольную сумму, проверка пропущена[/dim]"
+        )
         return True
     actual_sha = compute_file_sha256(file_path)
     if actual_sha != expected_sha:
         raise SystemExit(
             f"Ошибка SHA-256 для {asset_name}: хэш файла ({actual_sha}) не совпадает с upstream ({expected_sha})"
         )
-    print(f"  ✓ SHA-256 верифицирован по upstream ({expected_sha[:12]}...)")
+    console.print(f"  [green]✓[/green] SHA-256 верифицирован по upstream ({expected_sha[:12]}...)")
     return True
 
 
 _port_lock = threading.Lock()
-_next_port = [20000]
+_MIN_PORT: int = 20000
+_MAX_PORT: int = 45000
+_next_port: int = _MIN_PORT
 
 
 def _is_port_free(port: int) -> bool:
@@ -106,13 +126,14 @@ def _is_port_free(port: int) -> bool:
 
 
 def alloc_port(max_attempts: int = 1000) -> int:
+    global _next_port
     with _port_lock:
         for _ in range(max_attempts):
-            _next_port[0] += 1
-            if _next_port[0] > 60000:
-                _next_port[0] = 20000
-            if _is_port_free(_next_port[0]):
-                return _next_port[0]
+            _next_port += 1
+            if _next_port > _MAX_PORT:
+                _next_port = _MIN_PORT
+            if _is_port_free(_next_port):
+                return _next_port
         raise RuntimeError("Не удалось найти свободный порт")
 
 
@@ -197,7 +218,7 @@ def _download_engine(
     asset_name_template: str,
     target_bin_dir: Path,
     fallback_version: str | None = None,
-) -> tuple[Path, str]:
+) -> DownloadedEngine:
     """Скачивает и валидирует архив движка с автоматическим fallback на стабильную версию при ошибках."""
     tag = ver if ver.startswith("v") else f"v{ver}"
     clean_ver = ver.lstrip("v")
@@ -214,10 +235,12 @@ def _download_engine(
             except (SystemExit, Exception):
                 zip_path.unlink(missing_ok=True)
                 _download_and_verify_archive(url, zip_path, repo, tag, asset_name)
-        return zip_path, ver
+        return DownloadedEngine(zip_path=zip_path, version=ver)
     except Exception as e:
         if fallback_version and fallback_version != ver:
-            print(f"[dim]Не удалось получить {repo} {tag} ({e}), пробуем стабильную v{fallback_version}...[/dim]")
+            console.print(
+                f"[dim]Не удалось получить {repo} {tag} ({e}), пробуем стабильную v{fallback_version}...[/dim]"
+            )
             fb_tag = fallback_version if fallback_version.startswith("v") else f"v{fallback_version}"
             fb_clean = fallback_version.lstrip("v")
             fb_asset = asset_name_template.format(ver=fb_clean)
@@ -231,7 +254,7 @@ def _download_engine(
                 except (SystemExit, Exception):
                     fb_zip.unlink(missing_ok=True)
                     _download_and_verify_archive(url_fb, fb_zip, repo, fb_tag, fb_asset)
-            return fb_zip, fallback_version
+            return DownloadedEngine(zip_path=fb_zip, version=fallback_version)
         raise
 
 
@@ -248,26 +271,26 @@ def ensure_binaries(ver_sb: str, ver_xr: str, force: bool = False, bin_dir: Path
         except Exception:
             pass
 
-    print(f"Скачиваю движки: sing-box v{ver_sb}, Xray v{ver_xr} ...")
-    sb_zip, actual_ver_sb = _download_engine(
+    console.print(f"Скачиваю движки: sing-box v{ver_sb}, Xray v{ver_xr} ...")
+    sb_dl = _download_engine(
         SINGBOX_REPO,
         ver_sb,
         "sing-box-{ver}-windows-amd64.zip",
         target_bin_dir,
         fallback_version=DEFAULT_SINGBOX_VERSION,
     )
-    _extract_binary(sb_exe, sb_zip)
+    _extract_binary(sb_exe, sb_dl.zip_path)
 
-    xr_zip, actual_ver_xr = _download_engine(
+    xr_dl = _download_engine(
         XRAY_REPO,
         ver_xr,
         "Xray-windows-64.zip",
         target_bin_dir,
         fallback_version=DEFAULT_XRAY_VERSION,
     )
-    _extract_binary(xr_exe, xr_zip)
+    _extract_binary(xr_exe, xr_dl.zip_path)
 
-    actual_want = {"singbox": actual_ver_sb, "xray": actual_ver_xr}
+    actual_want = {"singbox": sb_dl.version, "xray": xr_dl.version}
     manifest.write_text(json.dumps(actual_want), encoding="utf-8")
     return sb_exe, xr_exe
 

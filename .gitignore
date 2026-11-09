@@ -31,6 +31,7 @@ report.md
 proxy-ok.txt
 results.json
 data/antidpi_ratings.json
+data/relay_state.json
 *-report.md
 *-verify.md
 *-ok.txt

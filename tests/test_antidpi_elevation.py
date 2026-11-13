@@ -38,6 +38,7 @@ def test_run_elevated_user_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cmd_benchmark_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda **_kw: False)
     monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
     monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)
@@ -53,6 +54,7 @@ def test_cmd_benchmark_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_cmd_benchmark_elevates_cancelled_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda **_kw: False)
     monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
 
     def mock_run_fail(**_):
@@ -64,6 +66,7 @@ def test_cmd_benchmark_elevates_cancelled_user(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_cmd_serve_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda **_kw: False)
     monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
     monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)
@@ -77,6 +80,7 @@ def test_cmd_serve_elevates_when_not_admin(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_cmd_benchmark_with_levels(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda **_kw: False)
     monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: False)
     mock_run = MagicMock(return_value=0)
     monkeypatch.setattr("proxy_probe.antidpi.runner.run_elevated_and_wait", mock_run)

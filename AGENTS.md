@@ -28,7 +28,7 @@
    - Бинарники кэшируются в папке `bin/` в корне проекта (или переопределяются через `PROXY_PROBE_BIN_DIR`) и валидируются по SHA-256 из релизов upstream (`.dgst` / `.sha256`).
 3. **Целевой API и гео**:
    - `https://generativelanguage.googleapis.com/v1beta/...` — Gemini API (маркер гео-блока: `User location is not supported`).
-   - `https://ipwho.is/` — гео-определение egress-IP для отчёта.
+   - `proxy_probe/ip_lookup.py` — каскад гео- и ISP-определения (`ipwho.is` -> `ipapi.co` -> `https://whois.ru/`, включая XHR `get-my-ip` и парсинг WHOIS HTML) для отчётов и детекта входящей сети.
 4. **Защита от исчерпания квот agy / Gemini**:
    - Автоматический выбор легковесной Flash-модели через `detect_best_agy_model` (приоритет: `flash.*low` -> `flash.*medium` -> `flash`; переопределение через `--agy-model` / `AGY_MODEL`).
    - Кэширование выбранной Flash-модели в метаданных `results.json` (`meta.best_model`, TTL 24ч) устраняет повторные вызовы `agy models` (9с) при регулярных запусках.
@@ -103,7 +103,7 @@
     - Изоляция ответственности (SRP): чистая функция `deduplicate_by_endpoint` в `proxy_probe/reporter.py` отбирает ровно один лучший рабочий профиль на каждый эндпоинт, устраняя клоны одного сервера с разными `fp` в `proxy-ok.txt` и снижая нагрузку на Throne.
 17. **Изолированный Anti-DPI релей и локальный рейтинг стратегий (Isolated Zapret2 Relay & Benchmark)**:
     - Полная изоляция от системного трафика (Zero System Interception): строгий отказ от глобального перехвата сетевого стека Windows (`--wf-tcp-out=443`). В WinDivert передаётся строгий белый список целевых IP (`--wf-raw-filter="ip.DstAddr in { <dead_ip1>, ... }"`). Трафик браузеров, банковских приложений, игр и ОС на 100% минует драйвер перехвата.
-    - Автономный SOCKS5-релей (`ZapretRelay`): локальный in-memory процесс `sing-box` на `127.0.0.1:10850` с `direct` outbound. В него направляются исключительно те серверы, которые не работают напрямую (`DEAD`).
+    - Автономный SOCKS5-релей (`ZapretRelay`): локальный in-memory процесс `sing-box` с `direct` outbound. Постоянный сервис (`--serve`, `--stop-relay`, `--status-relay`) и экспорт в `proxy-ok.txt` используют порт по умолчанию `DEFAULT_RELAY_PORT = 10850` (`--antidpi-port`, `RelayState.port`), а временные релеи Stage 2 и калибровки (`--calibrate`) динамически выделяют свободные эфемерные порты через `alloc_port()`. В релей направляются исключительно серверы, не работающие напрямую (`DEAD`).
     - Двухуровневый конвейер (Stage 1 direct -> Stage 2 Anti-DPI): работающие напрямую узлы соединяются напрямую с нулевым оверхедом (0% WinDivert). Узлы с сетевыми сбоями/сбросами DPI получают попытку спасения в Stage 2 (CLI-флаг `--antidpi`).
     - Каталог стратегий и бенчмарк под провайдера (`proxy_probe/antidpi`):
       - Каталог из 484 стратегий (`anti-dpi-for-russia`, `data/antidpi_catalogue.json`). Полный отказ от сторонних субъективных ярлыков (Golden/Silver): стратегии классифицируются строго по объективной механике (`technical_family`).
@@ -114,7 +114,7 @@
         - **Уровень 3 (`--calibrate 3`)**: расширенная калибровка ТОП-стратегий на пуле живых серверов с открытым TCP-портом (~100 узлов, ~4-5 мин). При неудаче рекомендует Уровень 4 (`--calibrate 4`).
         - **Уровень 4 (`--calibrate 4`)**: глубокий перебор всех 484 стратегий каталога (~20-25 мин).
       - Автообновление каталога из upstream (`uv run pxp --update-catalogue` или пункт 4 главного меню).
-      - Управление сервисом изолированного релея (`proxy_probe/antidpi/runner.py`): адаптивный переключатель пункта 2 в главном меню TUI (`[○ Остановлен]` <-> `[● Работает]`), фоновый запуск (`--serve --detach`), штатная остановка с выгрузкой драйвера `WinDivert` (`--stop-relay`), проверка статуса (`--status-relay`, состояние `RelayState` в `data/relay_state.json`) и автоматическая приостановка/перезапуск фонового релея на время работы Stage 2 и калибровки (`suspend_background_relay`).
+      - Управление сервисом изолированного релея (`proxy_probe/antidpi/runner.py`): адаптивный переключатель пункта 2 в главном меню TUI (`[○ Остановлен]` <-> `[● Работает]`), определение живого порта сервиса (`resolve_active_relay_port`), фоновый запуск (`--serve --detach`), штатная остановка с выгрузкой драйвера `WinDivert` (`--stop-relay`), проверка статуса (`--status-relay`, состояние `RelayState` в `data/relay_state.json`) и автоматическая приостановка/перезапуск фонового релея на время работы Stage 2 и калибровки (`suspend_background_relay`).
     - Прозрачная маршрутизация (Detour) в `proxy-ok.txt`:
       - Узлы `sing-box`, спасённые через Zapret, при экспорте в `proxy-ok.txt` автоматически конвертируются в формат Xray (`singbox_to_xray_outbound`), так как Throne игнорирует `detour` в подписках `sing-box`.
       - Для Xray: `"streamSettings": {"sockopt": {"dialerProxy": "zapret-relay"}}` + инъекция SOCKS5-релея в `outbounds`.
@@ -132,7 +132,7 @@
       - Единый прогресс-бар с динамической индикацией текущей пачки (`[пачка i/N]`).
       - CLI-флаг ограничения: `--antidpi-limit <int>` (по умолчанию 0 — все пачки).
 18. **Мультипровайдерная изоляция рейтингов Anti-DPI (Per-ISP / Per-ASN Ingress Isolation)**:
-    - Автодетект входящей сети пользователя через ASN (Autonomous System Number) IANA/RIPE: `proxy_probe/antidpi/isp.py` (`IspIdentity: AS<asn>_<slug>`).
+    - Автодетект входящей сети пользователя через ASN (Autonomous System Number) IANA/RIPE: `proxy_probe/antidpi/isp.py` (`detect_current_isp` через `proxy_probe/ip_lookup.py`: `ipwho.is` -> `ipapi.co` -> `whois.ru`, формирует `IspIdentity: AS<asn>_<slug>`).
     - «Фоллбек нельзя»: при отсутствии сети или невозможности точно определить оператора скрипты выбрасывают `IspDetectionError` и останавливаются (Fail-Fast), исключая тихие подмены на `"default"` и взаимную порчу профилей сетей (дом / работа).
     - Многопровайдерное хранилище `AntidpiDatabase` (схема v2) в `data/antidpi_ratings.json`: каждый оператор (дом, работа, мобильный роутер) владеет полностью изолированным профилем рейтингов, лидером стратегий и историей запусков.
     - Бесшовное переключение: при смене сети `run.cmd` и калибратор (`--calibrate`) автоматически выбирают лидера конкретного оператора (переопределение через CLI-флаг `--isp`).

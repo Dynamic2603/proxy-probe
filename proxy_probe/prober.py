@@ -25,6 +25,7 @@ from .engines import (
     wait_port,
     xray_shorthand_to_v2ray,
 )
+from .ip_lookup import lookup_ip_info
 from .models import (
     BLOCK_MARKERS,
     DEAD_PATTERNS,
@@ -39,7 +40,6 @@ from .models import (
     WEB_STATUS_CAPTCHA,
     WEB_STATUS_OK,
     QuotaInfo,
-    country_code_to_emoji,
     parse_quota_info,
 )
 from .parsers import USER_AGENT, extract_host_port
@@ -229,7 +229,6 @@ def check_agy_health(
 
 AGY_PROMPT = "Reply with only the word OK"
 AGY_PRINT_TIMEOUT_DEFAULT = "45s"
-GEO_URL = "http://ipwho.is/"
 
 
 def classify_agy(out: str, rc: int) -> str:
@@ -386,35 +385,13 @@ def batch_probe_tcp(
     return results
 
 
-def parse_geo_payload(data: dict) -> tuple[str, str, str, str, str]:
-    country_code = str(data.get("country_code", "")).strip().upper()
-    flag = data.get("flag", "")
-    if isinstance(flag, dict):
-        flag = flag.get("emoji", "")
-    if not flag and country_code:
-        flag = country_code_to_emoji(country_code)
-    country = f"{flag} {data.get('country', '')}".strip()
-    ip_out = str(data.get("ip", "")).strip()
-    city = str(data.get("city", "")).strip()
-    conn = data.get("connection")
-    org = ""
-    if isinstance(conn, dict):
-        org = str(conn.get("org") or conn.get("isp") or "").strip()
-    if not org:
-        org = str(data.get("org") or "").strip()
-    return country, ip_out, country_code, city, org
-
-
 def fetch_geo_for_ip(ip: str, timeout: float = 4.0) -> tuple[str, str, str, str, str]:
-    """Запрашивает гео-данные для egress IP напрямую с ipwho.is."""
-    if not ip or ip.startswith("127.") or ip == "localhost":
+    """Запрашивает гео-данные для egress IP по цепочке зеркал (ipwho.is -> ipapi.co -> whois.ru)."""
+    cleaned = (ip or "").strip()
+    if not cleaned or cleaned.startswith("127.") or cleaned in ("localhost", "::1"):
         return "", "", "", "", ""
-    url = f"http://ipwho.is/{ip}"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-            return parse_geo_payload(data)
+        return lookup_ip_info(ip=cleaned, timeout=timeout, user_agent=USER_AGENT).to_geo_tuple()
     except Exception:
         return "", "", "", "", ""
 
@@ -469,14 +446,12 @@ def resolve_ingress_country(host: str, timeout: float = 3.0) -> tuple[str, str]:
 
 
 def fetch_geo(port: int, timeout: float = 8.0) -> tuple[str, str, str, str, str]:
+    """Запрашивает гео-данные egress-IP прокси по цепочке зеркал (ipwho.is -> ipapi.co -> whois.ru)."""
     proxy_url = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
     opener = urllib.request.build_opener(handler)
-    req = urllib.request.Request(GEO_URL, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-            return parse_geo_payload(data)
+        return lookup_ip_info(ip=None, timeout=timeout, opener=opener, user_agent=USER_AGENT).to_geo_tuple()
     except Exception:
         return "", "", "", "", ""
 

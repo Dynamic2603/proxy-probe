@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from .antidpi.elevation import disable_quick_edit_mode
+from .antidpi.relay import DEFAULT_RELAY_PORT
 from .antidpi.runner import (
     print_relay_status,
     run_calibration,
@@ -258,8 +259,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--antidpi-port",
         type=int,
-        default=10850,
-        help="порт локального изолированного SOCKS5-релея (по умолчанию 10850)",
+        default=DEFAULT_RELAY_PORT,
+        help=f"порт локального изолированного SOCKS5-релея (по умолчанию {DEFAULT_RELAY_PORT})",
     )
     ap.add_argument(
         "--antidpi-limit",
@@ -372,7 +373,7 @@ class RuntimeContext:
     gist_id: str | None = None
     antidpi: bool = True
     antidpi_strategy: int | None = None
-    antidpi_port: int = 10850
+    antidpi_port: int = DEFAULT_RELAY_PORT
     antidpi_limit: int = 0
     isp: str | None = None
     no_elevate: bool = False
@@ -466,7 +467,7 @@ def _setup_environment(args: argparse.Namespace) -> RuntimeContext:
         gist_id=gist_id,
         antidpi=bool(getattr(args, "antidpi", True)),
         antidpi_strategy=getattr(args, "antidpi_strategy", None),
-        antidpi_port=int(getattr(args, "antidpi_port", 10850)),
+        antidpi_port=int(getattr(args, "antidpi_port", DEFAULT_RELAY_PORT)),
         antidpi_limit=int(getattr(args, "antidpi_limit", 0)),
         isp=getattr(args, "isp", None),
         no_elevate=bool(getattr(args, "no_elevate", False)),

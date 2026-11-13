@@ -108,6 +108,61 @@ def test_detect_current_isp_ipapi_fallback_on_ipwho_failure() -> None:
         assert ident.key == "AS8359_mts-pjsc"
 
 
+def test_detect_current_isp_whois_ru_fallback_on_both_failures() -> None:
+    called_urls: list[str] = []
+    whois_html = """
+    <html><body>
+      <pre class="raw-domain-info-pre">
+inetnum:        213.87.128.0 - 213.87.159.255
+netname:        MTSGPRS-3
+descr:          Mobile subscribers pool
+country:        RU
+source:         RIPE
+route:          213.87.128.0/20
+descr:          Mobile TeleSystems, PJSC
+origin:         AS8359
+      </pre>
+      <pre class="raw-domain-info-pre">
+описание:       Перевод
+      </pre>
+    </body></html>
+    """.encode()
+
+    def _make_resp(payload: bytes) -> MagicMock:
+        resp = MagicMock()
+        resp.read.return_value = payload
+        resp.__enter__.return_value.read.return_value = payload
+        return resp
+
+    def mock_urlopen(req, timeout=3.0):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        called_urls.append(url)
+        if "ipwho" in url:
+            raise RuntimeError("ipwho is down")
+        if "ipapi" in url:
+            raise RuntimeError("ipapi is down")
+        if url.endswith("/tools/get-my-ip"):
+            assert req.headers.get("X-requested-with") == "XMLHttpRequest"
+            return _make_resp(json.dumps({"output": "213.87.128.1"}).encode("utf-8"))
+        if url.endswith("/213.87.128.1"):
+            return _make_resp(whois_html)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        ident = detect_current_isp()
+        assert ident.asn == 8359
+        assert ident.isp_name == "Mobile subscribers pool"
+        assert ident.ingress_ip == "213.87.128.1"
+        assert ident.key == "AS8359_mobile-subscribers-pool"
+
+    assert called_urls == [
+        "http://ipwho.is/",
+        "https://ipapi.co/json/",
+        "https://whois.ru/tools/get-my-ip",
+        "https://whois.ru/213.87.128.1",
+    ]
+
+
 def test_detect_current_isp_strict_no_fallback_on_total_failure() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=RuntimeError("no network")),

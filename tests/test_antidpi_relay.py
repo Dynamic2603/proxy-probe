@@ -9,6 +9,7 @@ from proxy_probe.antidpi.relay import (
     is_port_in_use,
     wait_for_port,
 )
+from proxy_probe.engines import alloc_port
 
 
 def test_build_relay_config() -> None:
@@ -20,13 +21,12 @@ def test_build_relay_config() -> None:
 
 
 def test_is_port_in_use_free_port() -> None:
-    # Порт 59998 маловероятно занят
-    assert is_port_in_use(59998) is False
+    assert is_port_in_use(alloc_port()) is False
 
 
 def test_wait_for_port_timeout() -> None:
     # Ожидание недоступного порта должно вернуть False по таймауту
-    assert wait_for_port(59997, timeout=0.1) is False
+    assert wait_for_port(alloc_port(), timeout=0.1) is False
 
 
 def test_relay_mock_lifecycle() -> None:
@@ -45,8 +45,8 @@ def test_relay_mock_lifecycle() -> None:
 
 
 def test_relay_real_start_and_stop() -> None:
-    # Реальный запуск sing-box на тестовом порту 10999
-    test_port = 10999
+    # Реальный запуск sing-box на свободном эфемерном порту
+    test_port = alloc_port()
     relay = ZapretRelay(port=test_port)
 
     assert is_port_in_use(test_port) is False

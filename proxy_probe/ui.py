@@ -71,7 +71,7 @@ def format_live_counters(counts: dict[str, int]) -> str:
     return " | ".join(f"{k}: {counts.get(k, 0)}" for k in order)
 
 
-def select_main_action_interactive(relay_port: int = 10850) -> str:
+def select_main_action_interactive(relay_port: int | None = None) -> str:
     """Отображает главное интерактивное меню TUI proxy-probe с адаптивным статусом релея (SSOT)."""
     if not sys.stdin or not sys.stdin.isatty():
         return "probe"
@@ -79,20 +79,21 @@ def select_main_action_interactive(relay_port: int = 10850) -> str:
     from InquirerPy import inquirer
     from InquirerPy.base.control import Choice
 
-    from .antidpi.runner import is_relay_running, load_relay_state
+    from .antidpi.relay import DEFAULT_RELAY_PORT
+    from .antidpi.runner import resolve_active_relay_port
 
-    relay_active = is_relay_running(port=relay_port)
+    effective_port = DEFAULT_RELAY_PORT if relay_port is None else relay_port
+    relay_active, active_port, st = resolve_active_relay_port(effective_port)
     if relay_active:
-        st = load_relay_state()
         strat_hint = f", S{st.strategy_number:02d}" if st else ""
         relay_choice = Choice(
             value="stop_relay",
-            name=f"2. Остановить фоновый релей Zapret2 [● Работает на 127.0.0.1:{relay_port}{strat_hint}]",
+            name=f"2. Остановить фоновый релей Zapret2 [● Работает на 127.0.0.1:{active_port}{strat_hint}]",
         )
     else:
         relay_choice = Choice(
             value="serve",
-            name=f"2. Запустить фоновый релей Zapret2 (SOCKS5 127.0.0.1:{relay_port}) [○ Остановлен]",
+            name=f"2. Запустить фоновый релей Zapret2 (SOCKS5 127.0.0.1:{active_port}) [○ Остановлен]",
         )
 
     choices = [

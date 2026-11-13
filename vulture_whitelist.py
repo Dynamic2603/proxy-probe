@@ -3,6 +3,7 @@
 from proxy_probe.antidpi.elevation import SHELLEXECUTEINFO
 from proxy_probe.antidpi.models import StrategyProfile, StrategyRating
 from proxy_probe.models import EngineType, ExportRank
+from tests.conftest import _isolate_relay_state
 
 # Поля C-структуры WinAPI SHELLEXECUTEINFO (используются через ctypes.byref в ShellExecuteExW)
 _ = (
@@ -38,3 +39,6 @@ _enums = (
     EngineType.SINGBOX,
     EngineType.XRAY,
 )
+
+# Pytest autouse-фикстуры вызываются рантаймом pytest неявно
+_fixtures = (_isolate_relay_state,)

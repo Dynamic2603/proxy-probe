@@ -449,6 +449,7 @@ def test_execute_antidpi_stage_disabled() -> None:
 
 
 def test_execute_antidpi_stage_rescues_dead() -> None:
+    from proxy_probe.antidpi.isp import IspIdentity
     from proxy_probe.antidpi.models import StrategyProfile
     from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
@@ -474,6 +475,7 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
         chain="fake",
         args=("--fake",),
     )
+    dummy_isp = IspIdentity(asn=12389, isp_name="TestISP", org_name="TestISP", ingress_ip="1.1.1.1")
     mock_res = {
         "result": RESULT_OK,
         "country": "Germany",
@@ -484,7 +486,9 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
         "latency_ms": 55,
     }
 
-    with patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.isp.detect_current_isp", return_value=dummy_isp), \
+         patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
          patch("proxy_probe.antidpi.catalogue.get_strategy_by_number", return_value=dummy_strat), \
          patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
          patch("proxy_probe.antidpi.engine.WinwsRunner") as mock_runner, \
@@ -497,6 +501,7 @@ def test_execute_antidpi_stage_rescues_dead() -> None:
         rescued = execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
 
     assert rescued == 1
+    assert mock_relay.call_args.kwargs["port"] != ctx.antidpi_port
     assert s.result == RESULT_OK
     assert s.antidpi_strategy == 1
     assert s.country_code == "DE"
@@ -543,7 +548,8 @@ def test_execute_antidpi_stage_uac_cancelled() -> None:
     def mock_run_elevated(**_):
         raise PermissionError("UAC rejected")
 
-    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
          patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=mock_run_elevated):
         rescued = execute_antidpi_stage([s], [s], ctx, {}, "5s")
 
@@ -597,7 +603,8 @@ def test_execute_antidpi_stage_delegation(tmp_path: Path) -> None:
         return 0
 
     to_probe: list[Server] = []
-    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=False), \
          patch("proxy_probe.antidpi.elevation.run_elevated_and_wait", side_effect=fake_run_elevated):
         rescued = execute_antidpi_stage([s], to_probe, ctx, {}, "5s")
 
@@ -734,14 +741,16 @@ def test_execute_antidpi_stage_honors_limit() -> None:
         for i in range(80)
     ]
 
-    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
          patch("proxy_probe.antidpi.stage2.execute_antidpi_stage_core", return_value=0) as mock_core:
         execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
         passed_candidates = mock_core.call_args[1]["dead_candidates"]
         assert len(passed_candidates) == 50
 
     ctx.antidpi_limit = 0
-    with patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.elevation.is_admin", return_value=True), \
          patch("proxy_probe.antidpi.stage2.execute_antidpi_stage_core", return_value=0) as mock_core:
         execute_antidpi_stage(servers, servers.copy(), ctx, {}, "5s")
         passed_candidates = mock_core.call_args[1]["dead_candidates"]
@@ -749,6 +758,7 @@ def test_execute_antidpi_stage_honors_limit() -> None:
 
 
 def test_execute_antidpi_stage_multi_batch() -> None:
+    from proxy_probe.antidpi.isp import IspIdentity
     from proxy_probe.antidpi.models import StrategyProfile
     from proxy_probe.antidpi.stage2 import execute_antidpi_stage
 
@@ -799,7 +809,10 @@ def test_execute_antidpi_stage_multi_batch() -> None:
         def __exit__(self, *_args: object) -> None:
             pass
 
-    with patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
+    dummy_isp = IspIdentity(asn=12389, isp_name="TestISP", org_name="TestISP", ingress_ip="1.1.1.1")
+    with patch("proxy_probe.antidpi.runner.is_relay_running", return_value=False), \
+         patch("proxy_probe.antidpi.isp.detect_current_isp", return_value=dummy_isp), \
+         patch("proxy_probe.antidpi.engine.ensure_zapret_binaries", return_value=Path("bin/zapret")), \
          patch("proxy_probe.antidpi.catalogue.get_strategy_by_number", return_value=dummy_strat), \
          patch("proxy_probe.antidpi.relay.ZapretRelay") as mock_relay, \
          patch("proxy_probe.antidpi.engine.WinwsRunner", side_effect=MockRunner), \
@@ -922,6 +935,7 @@ def test_run_serve_fails_fast_on_isp_detection_error(monkeypatch) -> None:
     from proxy_probe.antidpi.isp import IspDetectionError
     from proxy_probe.cli import main
 
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda **_kw: False)
     monkeypatch.setattr("proxy_probe.antidpi.runner.is_admin", lambda: True)
 
     def _raise_isp_err(**_kw: object) -> None:

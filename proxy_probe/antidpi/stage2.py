@@ -378,7 +378,7 @@ def run_stage2_worker(task_file: Path, log_file: Path | None = None) -> int:
             xr_exe=xr_exe,
             antidpi=True,
             antidpi_strategy=data.get("antidpi_strategy"),
-            antidpi_port=int(data.get("antidpi_port", 10850)),
+            antidpi_port=int(data.get("antidpi_port", _relay.DEFAULT_RELAY_PORT)),
             antidpi_limit=int(data.get("antidpi_limit", 0)),
             isp=data.get("isp"),
             use_geo_precheck=bool(data.get("use_geo_precheck", True)),
@@ -487,15 +487,15 @@ def execute_antidpi_stage_core(
     )
     num_batches = len(batches)
 
+    relay_port = alloc_port()
     console.print(
         f"\n[bold cyan]Stage 2: Anti-DPI Релей {isp_label}[/bold cyan] "
         f"(стратегия S{strat.number:02d} {strat.name[:35]}, "
         f"узлов: {total_candidates}, "
         f"пачек: {num_batches} по <={batch_size} IP и <={ANTIDPI_MAX_PORTS_PER_BATCH} портов, "
-        f"порт {ctx.antidpi_port})..."
+        f"порт {relay_port})..."
     )
 
-    relay_port = ctx.antidpi_port
     rescued_count = 0
     init_desc = f"Anti-DPI спасение [пачка 1/{num_batches}]" if num_batches > 1 else "Anti-DPI попытка спасения"
     pbar = tqdm(

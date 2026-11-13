@@ -177,3 +177,38 @@ def test_suspend_background_relay_pauses_and_restarts(monkeypatch: pytest.Monkey
         events.append("work")
 
     assert events == ["stop", "work", "start"]
+
+
+def test_suspend_background_relay_detects_custom_port_from_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    custom_state = RelayState(
+        pid=1001,
+        singbox_pid=1002,
+        winws_pid=1003,
+        port=10855,
+        host="127.0.0.1",
+        strategy_number=11,
+        strategy_name="S11",
+        isp="ISP",
+        target_ips_count=5,
+        started_at="2026-11-08T12:00:00",
+    )
+    monkeypatch.setattr("proxy_probe.antidpi.runner.load_relay_state", lambda: custom_state)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.is_relay_running", lambda port=10850, **_kw: port == 10855)
+
+    seen_ports: list[tuple[str, int]] = []
+
+    def _mock_stop(args: argparse.Namespace) -> int:
+        seen_ports.append(("stop", args.antidpi_port))
+        return 0
+
+    def _mock_start(args: argparse.Namespace) -> int:
+        seen_ports.append(("start", args.antidpi_port))
+        return 0
+
+    monkeypatch.setattr("proxy_probe.antidpi.runner.stop_relay_service", _mock_stop)
+    monkeypatch.setattr("proxy_probe.antidpi.runner.run_relay_service", _mock_start)
+
+    with suspend_background_relay(relay_port=10850) as was_running:
+        assert was_running is True
+
+    assert seen_ports == [("stop", 10855), ("start", 10855)]

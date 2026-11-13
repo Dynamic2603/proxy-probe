@@ -22,7 +22,7 @@ from rich.panel import Panel
 from tqdm import tqdm
 
 from ..cache import ResultCache, default_cache_path, server_from_cache_entry
-from ..engines import clean_proxy_env, project_root
+from ..engines import alloc_port, clean_proxy_env, project_root
 from ..models import RESULT_DEAD, Server
 from ..parsers import extract_host_port
 from ..ui import console, print_benchmark_results_panel
@@ -143,6 +143,18 @@ def is_relay_running(
     return not (state is not None and state.winws_pid is not None and not is_process_alive(state.winws_pid))
 
 
+def resolve_active_relay_port(
+    preferred_port: int = DEFAULT_RELAY_PORT,
+) -> tuple[bool, int, RelayState | None]:
+    """Определяет, активен ли фоновый релей, возвращая (is_running, port, state) (SSOT)."""
+    state = load_relay_state()
+    if is_relay_running(port=preferred_port):
+        return True, preferred_port, state
+    if state is not None and state.port != preferred_port and is_relay_running(port=state.port):
+        return True, state.port, state
+    return False, preferred_port, state
+
+
 @contextlib.contextmanager
 def suspend_background_relay(
     relay_port: int = DEFAULT_RELAY_PORT,
@@ -150,12 +162,12 @@ def suspend_background_relay(
     strategy: int | None = None,
 ) -> Iterator[bool]:
     """Временно приостанавливает фоновый релей на время прогона Stage 2 или калибровки и перезапускает его после."""
-    was_running = is_relay_running(port=relay_port)
-    prev_state = load_relay_state() if was_running else None
+    was_running, target_port, state = resolve_active_relay_port(relay_port)
+    prev_state = state if was_running else None
     if was_running:
         console.print("[dim]Приостановка фонового релея Zapret2 на время проверки...[/dim]")
         stop_args = argparse.Namespace(
-            antidpi_port=relay_port,
+            antidpi_port=target_port,
             no_elevate=False,
             quiet=True,
         )
@@ -166,7 +178,7 @@ def suspend_background_relay(
         if was_running:
             console.print("[dim]Перезапуск фонового релея Zapret2 с обновлённым пулом...[/dim]")
             restart_args = argparse.Namespace(
-                antidpi_port=relay_port,
+                antidpi_port=target_port,
                 antidpi_strategy=strategy or (prev_state.strategy_number if prev_state else None),
                 isp=isp or (prev_state.isp if prev_state else None),
                 detach=True,
@@ -414,7 +426,7 @@ def _execute_calibration(args: argparse.Namespace, level: int) -> int:
     ratings: list[StrategyRating] = []
     server_rescue_map: dict[str, list[tuple[int, int]]] = {}
 
-    relay_port = int(getattr(args, "antidpi_port", DEFAULT_RELAY_PORT) or DEFAULT_RELAY_PORT)
+    relay_port = alloc_port()
     workers = min(len(selected), int(getattr(args, "jobs", 15) or 15))
     probe_timeout = float(cfg.timeout)
     enable_profile = bool(getattr(args, "profile", False))
@@ -731,6 +743,9 @@ def stop_relay_service(args: argparse.Namespace) -> int:
     quiet = bool(getattr(args, "quiet", False))
     state = load_relay_state()
     port_busy = is_port_in_use(relay_port)
+    if not port_busy and state is not None and state.port != relay_port and is_port_in_use(state.port):
+        relay_port = state.port
+        port_busy = True
 
     if not port_busy and state is None:
         if not quiet:
@@ -797,9 +812,8 @@ def stop_relay_service(args: argparse.Namespace) -> int:
 
 def print_relay_status(args: argparse.Namespace) -> int:
     """Выводит текущий статус фонового релея Zapret2 в консоль."""
-    relay_port = int(getattr(args, "antidpi_port", DEFAULT_RELAY_PORT) or DEFAULT_RELAY_PORT)
-    running = is_relay_running(port=relay_port)
-    state = load_relay_state()
+    preferred_port = int(getattr(args, "antidpi_port", DEFAULT_RELAY_PORT) or DEFAULT_RELAY_PORT)
+    running, relay_port, state = resolve_active_relay_port(preferred_port)
 
     if running:
         lines = [

@@ -3,7 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from proxy_probe.antidpi.relay import DEFAULT_RELAY_PORT
 from proxy_probe.cli import RuntimeContext
+
+
+@pytest.fixture(autouse=True)
+def _isolate_relay_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Изолирует путь к relay_state.json от реального data/relay_state.json на диске."""
+    monkeypatch.setattr(
+        "proxy_probe.antidpi.runner.default_relay_state_path",
+        lambda: tmp_path / "relay_state.json",
+    )
 
 
 def make_runtime_context(**overrides: Any) -> RuntimeContext:
@@ -35,7 +47,7 @@ def make_runtime_context(**overrides: Any) -> RuntimeContext:
         "gist_id": None,
         "antidpi": False,
         "antidpi_strategy": None,
-        "antidpi_port": 10850,
+        "antidpi_port": DEFAULT_RELAY_PORT,
         "antidpi_limit": 0,
         "isp": None,
         "no_elevate": False,
